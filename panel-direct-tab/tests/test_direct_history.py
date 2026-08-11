@@ -1,0 +1,189 @@
+"""Сквозная проверка истории Директа на копии панели.
+
+Провайдер подменяется заглушкой — тест проверяет наш код (разбор TSV-строк,
+идемпотентный upsert, агрегаты, ночной прогон, рендер), а не доступность API
+Яндекса.
+
+Запуск из корня панели с установленным пакетом:
+    python -m pytest tests/test_direct_history.py -q
+либо напрямую:  python tests/test_direct_history.py
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from datetime import date, timedelta
+
+os.environ.setdefault("DB_URL", "sqlite:///" + tempfile.mktemp(suffix=".db"))
+os.environ.setdefault("ENABLE_SCHEDULER", "false")
+sys.path.insert(0, os.getcwd())
+
+from app.db.base import Base, SessionLocal, engine  # noqa: E402
+from app.db import models  # noqa: E402,F401 — таблицы самой панели
+from app.db import models_direct  # noqa: E402,F401 — таблицы Директа
+from app.services import direct_store as store  # noqa: E402
+
+D = "example.com"
+DAY = date(2026, 8, 1)
+
+
+def _rows(day: date, clicks: int, cost: str, campaign="111"):
+    return [{
+        "Date": day.isoformat(), "CampaignId": campaign, "CampaignName": "Поиск — Москва",
+        "Impressions": "1000", "Clicks": str(clicks), "Cost": cost, "Conversions": "3",
+    }]
+
+
+def setup_module(_=None):
+    Base.metadata.create_all(engine)
+
+
+def test_schema_created():
+    names = set(Base.metadata.tables)
+    for t in ("direct_daily", "direct_campaign_daily", "direct_breakdown_daily",
+              "direct_collect_run"):
+        assert t in names, f"нет таблицы {t}"
+
+
+def test_upsert_is_idempotent_and_overwrites():
+    """Повторный сбор того же дня перезаписывает строку, а не дублирует её —
+    без этого правки Директа задним числом ломали бы историю."""
+    db = SessionLocal()
+    try:
+        store.save_daily(db, D, "", _rows(DAY, 10, "100.50"))
+        store.save_daily(db, D, "", _rows(DAY, 10, "100.50"))
+        db.commit()
+        t = store.totals(db, D, DAY, DAY)
+        assert t["clicks"] == 10, t
+        assert abs(t["cost"] - 100.50) < 1e-6, t
+
+        # Директ пересчитал день — цифры должны замениться, а не сложиться
+        store.save_daily(db, D, "", _rows(DAY, 8, "80.25"))
+        db.commit()
+        t = store.totals(db, D, DAY, DAY)
+        assert t["clicks"] == 8, t
+        assert abs(t["cost"] - 80.25) < 1e-6, t
+    finally:
+        db.close()
+
+
+def test_tsv_quirks_parsed():
+    """'--' вместо пустого, запятая как разделитель дробной части, неразрывный
+    пробел в тысячах — всё это реально приходит в TSV Директа."""
+    db = SessionLocal()
+    try:
+        d = DAY + timedelta(days=1)
+        store.save_daily(db, D, "", [{
+            "Date": d.isoformat(), "Impressions": "1\xa0234", "Clicks": "12",
+            "Cost": "1234,56", "Conversions": "--",
+        }])
+        db.commit()
+        t = store.totals(db, D, d, d)
+        assert t["impressions"] == 1234, t
+        assert abs(t["cost"] - 1234.56) < 1e-6, t
+        assert t["conversions"] == 0, t
+    finally:
+        db.close()
+
+
+def test_attribution_keeps_histories_apart():
+    """Смена модели атрибуции не должна затирать уже собранные числа."""
+    db = SessionLocal()
+    try:
+        d = DAY + timedelta(days=2)
+        store.save_daily(db, D, "", _rows(d, 5, "50"))
+        store.save_daily(db, D, "LSC", _rows(d, 7, "70"))
+        db.commit()
+        assert store.totals(db, D, d, d, "")["clicks"] == 5
+        assert store.totals(db, D, d, d, "LSC")["clicks"] == 7
+    finally:
+        db.close()
+
+
+def test_breakdown_merges_duplicate_keys():
+    """Одна фраза приходит несколькими строками (разные группы) — в истории
+    должна остаться одна строка с суммой."""
+    db = SessionLocal()
+    try:
+        d = DAY + timedelta(days=3)
+        raw = [
+            {"Date": d.isoformat(), "CampaignId": "1", "CriterionId": "77",
+             "Criterion": "купить компрессор", "Impressions": "100", "Clicks": "5", "Cost": "50"},
+            {"Date": d.isoformat(), "CampaignId": "2", "CriterionId": "77",
+             "Criterion": "купить компрессор", "Impressions": "40", "Clicks": "3", "Cost": "30"},
+        ]
+        store.save_breakdown(db, D, "criteria", "", raw, "CriterionId", "Criterion")
+        db.commit()
+        rows = store.breakdown(db, D, "criteria", d, d)
+        assert len(rows) == 1, rows
+        assert rows[0]["clicks"] == 8 and abs(rows[0]["cost"] - 80) < 1e-6, rows
+    finally:
+        db.close()
+
+
+def test_window_widens_for_late_revisions():
+    """Окно очередного сбора должно заходить назад на REFETCH_DAYS от последнего
+    успешного дня — Директ правит свежие цифры несколько суток."""
+    from app.db.models_direct import DirectCollectRun
+    from app.services import direct_collect
+
+    db = SessionLocal()
+    try:
+        today = date(2026, 8, 20)
+        # истории нет — берём широкое стартовое окно
+        w = direct_collect.compute_window(db, "fresh.example", today)
+        assert w.end == today - timedelta(days=1)
+        assert (w.end - w.start).days == direct_collect.SEED_DAYS
+
+        db.add(DirectCollectRun(domain=D, job_type="daily", status="ok",
+                                target_date=date(2026, 8, 18)))
+        db.commit()
+        w = direct_collect.compute_window(db, D, today)
+        assert w.start == date(2026, 8, 18) - timedelta(days=direct_collect.REFETCH_DAYS - 1), w.start
+        assert w.end == date(2026, 8, 19), w.end
+    finally:
+        db.close()
+
+
+def test_daily_run_survives_a_broken_domain(monkeypatch=None):
+    """Ошибка Директа по одному домену не должна ронять прогон."""
+    from app.providers.yandex_direct import DirectError
+    from app.services import direct_collect
+
+    db = SessionLocal()
+    try:
+        direct_collect.connected_domains = lambda _db: ["bad.example"]
+        def _boom(*a, **k):
+            raise DirectError("нет доступа к API")
+        direct_collect.collect = _boom
+        res = direct_collect.run_daily(db)
+        assert res == {"bad.example": -1}, res
+    finally:
+        db.close()
+
+
+def test_page_renders_with_history():
+    """Страница должна отрисоваться и с историей, и без неё."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    r = client.get("/direct")
+    assert r.status_code == 200, r.status_code
+    assert "Директ" in r.text
+
+
+if __name__ == "__main__":
+    setup_module()
+    failed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"  ok   {name}")
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                print(f"  FAIL {name}: {type(exc).__name__}: {exc}")
+    print("ПРОВАЛЕНО:" if failed else "Все тесты прошли.", failed or "")
+    raise SystemExit(1 if failed else 0)

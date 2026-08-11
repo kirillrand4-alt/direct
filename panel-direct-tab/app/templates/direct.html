@@ -89,6 +89,128 @@
 {% endif %}
 {% endif %}
 
+{# ── История: всё ниже читается из БД, а не из живого запроса к Директу ── #}
+{% if cur_domain %}
+<article style="margin-top:1.2rem">
+  <header>
+    История
+    {% if hist %}<small style="float:right">данные с {{ hist.first }} по {{ hist.last }}</small>{% endif %}
+  </header>
+
+  {% if hist %}
+  {% set t = hist.totals %}{% set p = hist.prev %}
+  {% macro delta(now, was) -%}
+    {%- if was -%}
+      {%- set d = (now - was) / was * 100 -%}
+      <small style="color:{{ 'var(--pico-ins-color, #2a7)' if d >= 0 else 'var(--pico-del-color, #c33)' }}">
+        {{ '%+.1f'|format(d) }}%</small>
+    {%- else -%}<small>—</small>{%- endif -%}
+  {%- endmacro %}
+  <p><small>Сравнение с предыдущим периодом ({{ hist.prev_range[0] }} — {{ hist.prev_range[1] }}):</small></p>
+  <div class="grid">
+    <article><hgroup><h3>{{ t.clicks|numfmt }} {{ delta(t.clicks, p.clicks) }}</h3><p>Клики</p></hgroup></article>
+    <article><hgroup><h3>{{ t.impressions|numfmt }} {{ delta(t.impressions, p.impressions) }}</h3><p>Показы</p></hgroup></article>
+    <article><hgroup><h3>{{ t.cost|numfmt }} ₽ {{ delta(t.cost, p.cost) }}</h3><p>Расход</p></hgroup></article>
+    <article><hgroup><h3>{{ '%.2f'|format(t.cpc) }} ₽ {{ delta(t.cpc, p.cpc) }}</h3><p>Цена клика</p></hgroup></article>
+    {% if t.conversions or p.conversions %}
+    <article><hgroup><h3>{{ t.conversions|numfmt }} {{ delta(t.conversions, p.conversions) }}</h3><p>Конверсии</p></hgroup></article>
+    <article><hgroup><h3>{% if t.conversions %}{{ '%.0f'|format(t.cpa) }} ₽{% else %}—{% endif %} {{ delta(t.cpa, p.cpa) }}</h3><p>Цена конверсии</p></hgroup></article>
+    {% endif %}
+  </div>
+
+  {% if hist.campaigns %}
+  <h4 style="margin-top:1rem">Кампании за период</h4>
+  <figure>
+    <table role="grid">
+      <thead><tr>
+        <th>Кампания</th><th>Показы</th><th>Клики</th><th>Расход, ₽</th>
+        {% if t.conversions %}<th>Конв.</th><th>CPA, ₽</th>{% endif %}
+      </tr></thead>
+      <tbody>
+      {% for c in hist.campaigns %}
+        <tr>
+          <td>{{ c.campaign_name }}</td>
+          <td>{{ c.impressions|numfmt }}</td>
+          <td>{{ c.clicks|numfmt }}</td>
+          <td>{{ c.cost|numfmt }}</td>
+          {% if t.conversions %}
+          <td>{{ c.conversions|numfmt }}</td>
+          <td>{% if c.conversions %}{{ '%.0f'|format(c.cost / c.conversions) }}{% else %}—{% endif %}</td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+  <p><small>Из сохранённой истории — работает, даже когда живой запрос к Директу недоступен.</small></p>
+  {% endif %}
+
+  {% if hist.enabled_kinds %}
+  <h4 style="margin-top:1rem">Разрезы</h4>
+  <p>
+    {% for k in hist.enabled_kinds %}
+    <a href="{{ base_path }}/direct?domain={{ cur_domain }}&start={{ range.start }}&end={{ range.end }}&kind={{ k }}"
+       role="button" class="{{ '' if k == kind else 'outline' }}" style="margin-right:.4rem">
+      {{ {'criteria':'Фразы','query':'Поисковые запросы','device':'Устройства','region':'Регионы'}[k] }}
+    </a>
+    {% endfor %}
+  </p>
+  {% if hist.breakdown %}
+  <figure>
+    <table role="grid">
+      <thead><tr>
+        <th>{{ {'criteria':'Фраза','query':'Запрос','device':'Устройство','region':'Регион'}.get(kind, 'Ключ') }}</th>
+        <th>Показы</th><th>Клики</th><th>CTR, %</th><th>Расход, ₽</th><th>CPC, ₽</th>
+        {% if t.conversions %}<th>Конв.</th>{% endif %}
+      </tr></thead>
+      <tbody>
+      {% for r in hist.breakdown %}
+        <tr>
+          <td>{{ r.key }}</td>
+          <td>{{ r.impressions|numfmt }}</td>
+          <td>{{ r.clicks|numfmt }}</td>
+          <td>{{ '%.2f'|format(r.ctr) }}</td>
+          <td>{{ r.cost|numfmt }}</td>
+          <td>{{ '%.2f'|format(r.cpc) }}</td>
+          {% if t.conversions %}<td>{{ r.conversions|numfmt }}</td>{% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+  <p><small>Топ-200 строк по расходу за выбранный период.</small></p>
+  {% else %}
+  <p><small>За этот период в выбранном разрезе данных нет — возможно, разрез включили позже.
+    Нажмите «Загрузить историю», чтобы дособрать его за прошлые дни.</small></p>
+  {% endif %}
+  {% endif %}
+
+  {% else %}
+  <p><small>Истории пока нет — ночной сбор ещё не отработал. Можно запустить сбор вручную кнопкой ниже.</small></p>
+  {% endif %}
+
+  {# состояние сбора и ручной запуск #}
+  <footer>
+    {% if last_run %}
+    <small>Последний сбор: {{ last_run.started_at.strftime('%d.%m %H:%M') }} —
+      {% if last_run.status == 'ok' %}успешно, строк {{ last_run.rows_written }}
+      {% elif last_run.status == 'pending' %}идёт
+      {% else %}<span style="color:var(--pico-del-color, #c33)">ошибка: {{ last_run.error_text|truncate(160) }}</span>
+      {% endif %}
+    </small><br>
+    {% endif %}
+    <form method="post" action="{{ base_path }}/ui/direct/collect"
+          style="display:inline-flex;gap:.5rem;align-items:end;flex-wrap:wrap">
+      <input type="hidden" name="domain" value="{{ cur_domain }}">
+      <button type="submit" class="secondary" name="days" value="0">Собрать сейчас</button>
+      <button type="submit" class="outline" name="days" value="480">Загрузить историю за 480 дней</button>
+    </form>
+    <small style="display:block;margin-top:.4rem">Ночной сбор идёт вместе с остальными источниками
+      и каждый раз перезабирает последние 14 дней — Директ правит свежие цифры задним числом.</small>
+  </footer>
+</article>
+{% endif %}
+
 <details style="margin-top:1.2rem">
   <summary>Настройки Директа</summary>
   <form method="post" action="{{ base_path }}/ui/direct/token" class="grid">
@@ -108,6 +230,40 @@
       <input type="password" name="token" placeholder="необязательно">
     </label>
     <label>&nbsp;<button type="submit" class="secondary">Сохранить для домена</button></label>
+  </form>
+  {% endif %}
+  {% if cur_domain %}
+  <hr>
+  <form method="post" action="{{ base_path }}/ui/direct/collect-settings">
+    <input type="hidden" name="domain" value="{{ cur_domain }}">
+    <div class="grid">
+      <label>Цели Метрики для {{ cur_domain }}<br><small>ID через запятую; включают конверсии и CPA</small>
+        <input name="goals" value="{{ goals }}" placeholder="напр. 123456789,987654321">
+      </label>
+      <label>Модель атрибуции<br><small>работает только вместе с целями</small>
+        <select name="attribution">
+          <option value=""{% if not attribution %} selected{% endif %}>по умолчанию</option>
+          {% for code, title in [('LSC','Последний значимый переход'), ('LC','Последний переход'),
+                                 ('FC','Первый переход'), ('LYDC','Последний переход из Яндекса'),
+                                 ('AUTO','Автоматическая')] %}
+          <option value="{{ code }}"{% if attribution == code %} selected{% endif %}>{{ title }} ({{ code }})</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <fieldset>
+      <legend><small>Какие разрезы собирать в историю</small></legend>
+      {% for k, title in [('criteria','Фразы'), ('query','Поисковые запросы'),
+                          ('device','Устройства'), ('region','Регионы')] %}
+      <label style="display:inline-block;margin-right:1rem">
+        <input type="checkbox" name="breakdowns" value="{{ k }}"
+               {% if k in (breakdowns or '').split(',') %}checked{% endif %}> {{ title }}
+      </label>
+      {% endfor %}
+      <small style="display:block">Каждый разрез — отдельный отчёт при каждом сборе: больше баллов
+        и больше строк в БД. Фразы и поисковые запросы самые объёмные.</small>
+    </fieldset>
+    <button type="submit" class="secondary">Сохранить настройки сбора</button>
   </form>
   {% endif %}
   <p><small>Как получить токен: <a href="https://oauth.yandex.ru/" target="_blank" rel="noopener">oauth.yandex.ru</a>

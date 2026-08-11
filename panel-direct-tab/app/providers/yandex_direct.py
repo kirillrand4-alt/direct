@@ -117,7 +117,8 @@ class YandexDirectProvider:
         return SANDBOX_URL if sandbox else REPORTS_URL
 
     # ---------- запрос отчёта ---------- #
-    def _report(self, domain, dr, report_type: str, field_names, goals=None) -> list[dict]:
+    def _report(self, domain, dr, report_type: str, field_names, goals=None,
+                attribution=None) -> list[dict]:
         headers = {
             "Authorization": f"Bearer {self._token(domain)}",
             "Accept-Language": "ru",
@@ -148,6 +149,10 @@ class YandexDirectProvider:
         }
         if goals:
             params["Goals"] = [str(g) for g in goals]
+            # Модель атрибуции имеет смысл только вместе с целями: она меняет,
+            # какому визиту засчитывается конверсия. Без Goals Директ её отвергнет.
+            if attribution:
+                params["AttributionModels"] = [str(a) for a in attribution]
 
         body = {"params": params}
         url = self._url()
@@ -179,17 +184,62 @@ class YandexDirectProvider:
             "Отчёт Директа не готов за отведённое время — попробуйте позже или сузьте период."
         )
 
-    # ---------- готовые отчёты ---------- #
-    def campaigns(self, domain, dr, goals=None) -> list[dict]:
+    # ---------- готовые отчёты (живой просмотр) ---------- #
+    def campaigns(self, domain, dr, goals=None, attribution=None) -> list[dict]:
         """Итоги за период в разрезе кампаний."""
         fields = ["CampaignId", "CampaignName", "Impressions", "Clicks", "Cost"]
         if goals:
             fields.append("Conversions")
-        return self._report(domain, dr, "CAMPAIGN_PERFORMANCE_REPORT", fields, goals)
+        return self._report(domain, dr, "CAMPAIGN_PERFORMANCE_REPORT", fields,
+                            goals, attribution)
 
-    def daily(self, domain, dr, goals=None) -> list[dict]:
+    def daily(self, domain, dr, goals=None, attribution=None) -> list[dict]:
         """Подённая динамика по всему аккаунту."""
         fields = ["Date", "Impressions", "Clicks", "Cost"]
         if goals:
             fields.append("Conversions")
-        return self._report(domain, dr, "ACCOUNT_PERFORMANCE_REPORT", fields, goals)
+        return self._report(domain, dr, "ACCOUNT_PERFORMANCE_REPORT", fields,
+                            goals, attribution)
+
+    # ---------- отчёты для истории (подённая гранулярность) ---------- #
+    # kind -> (тип отчёта, поле-идентификатор, поле-подпись). Идентификатора нет
+    # там, где сам ключ и есть текст (поисковая фраза, тип устройства).
+    BREAKDOWNS: dict[str, tuple[str, str | None, str]] = {
+        "criteria": ("CRITERIA_PERFORMANCE_REPORT", "CriterionId", "Criterion"),
+        "query": ("SEARCH_QUERY_PERFORMANCE_REPORT", None, "Query"),
+        "device": ("CUSTOM_REPORT", None, "Device"),
+        "region": ("CUSTOM_REPORT", "TargetingLocationId", "TargetingLocationName"),
+    }
+
+    def campaigns_daily(self, domain, dr, goals=None, attribution=None) -> list[dict]:
+        """Кампании с разбивкой по дням — то, что ложится в историю.
+
+        Отдельно от ``campaigns``: там период схлопнут в одну строку на кампанию
+        (дёшево для показа), здесь строка на кампанию-день (нужно для графиков и
+        произвольной агрегации по неделям/месяцам).
+        """
+        fields = ["Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost"]
+        if goals:
+            fields.append("Conversions")
+        return self._report(domain, dr, "CAMPAIGN_PERFORMANCE_REPORT", fields,
+                            goals, attribution)
+
+    def breakdown_daily(self, domain, dr, kind: str, goals=None,
+                        attribution=None) -> list[dict]:
+        """Подённый срез в одном из разрезов: фразы, запросы, устройства, регионы."""
+        spec = self.BREAKDOWNS.get(kind)
+        if spec is None:
+            raise DirectError(f"Неизвестный разрез Директа: {kind}")
+        report_type, id_field, text_field = spec
+
+        fields = ["Date"]
+        if kind in ("criteria", "query"):
+            # только у фраз и запросов есть осмысленная привязка к кампании
+            fields.append("CampaignId")
+        if id_field:
+            fields.append(id_field)
+        fields.append(text_field)
+        fields += ["Impressions", "Clicks", "Cost"]
+        if goals:
+            fields.append("Conversions")
+        return self._report(domain, dr, report_type, fields, goals, attribution)

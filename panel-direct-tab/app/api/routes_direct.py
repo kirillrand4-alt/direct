@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
+import threading
+from datetime import timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -17,6 +20,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.deps import get_db, parse_date_range
 from app.web import templates
+
+# Импорт ради побочного эффекта: модели должны попасть в Base.metadata до того,
+# как lifespan вызовет init_db(). Роутеры импортируются на старте main.py, то
+# есть раньше — поэтому create_all создаст таблицы Директа вместе с остальными.
+from app.db import models_direct  # noqa: F401
 
 router = APIRouter(tags=["direct"], include_in_schema=False)
 BP = get_settings().base_path  # "" или, напр., "/stat" — для целей редиректов
@@ -38,6 +46,7 @@ def _resolve_domain(domains: list[dict], domain: str | None) -> str | None:
 @router.get("/direct")
 def direct_page(request: Request, domain: str | None = None,
                 start: str | None = None, end: str | None = None,
+                kind: str | None = None,
                 msg: str | None = None, db: Session = Depends(get_db)):
     from app.credentials import get_cred
     from app.services.direct import direct_overview
@@ -58,8 +67,54 @@ def direct_page(request: Request, domain: str | None = None,
         "token_set": bool((get_cred("yandex_direct_token") or "").strip()),
         "login": get_cred(f"direct_login:{cur}") if cur else None,
         **data,
+        **_history_ctx(db, cur, dr, kind),
     }
     return templates.TemplateResponse(request, "direct.html", ctx)
+
+
+def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
+    """Всё, что читается из сохранённой истории, а не из живого запроса.
+
+    История может отсутствовать (сбор ещё не отработал) — тогда блок на вкладке
+    просто не показывается, а живой просмотр продолжает работать как раньше.
+    """
+    from app.providers.yandex_direct import YandexDirectProvider
+    from app.services import direct_collect, direct_store as store
+
+    kinds = list(YandexDirectProvider.BREAKDOWNS)
+    empty = {"hist": None, "kind": kind if kind in kinds else None, "kinds": kinds,
+             "goals": "", "attribution": "", "breakdowns": "", "last_run": None}
+    if not domain:
+        return empty
+
+    goals, attribution, enabled_kinds = direct_collect.settings_for(domain)
+    attr_key = attribution if goals else ""
+    empty.update({"goals": ",".join(goals), "attribution": attribution,
+                  "breakdowns": ",".join(enabled_kinds),
+                  "last_run": store.last_run(db, domain)})
+
+    first, last = store.history_bounds(db, domain)
+    if first is None:
+        return empty
+
+    span = (dr.end - dr.start).days + 1
+    prev_end = dr.start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=span - 1)
+    cur_kind = kind if kind in kinds else (enabled_kinds[0] if enabled_kinds else None)
+
+    empty["kind"] = cur_kind
+    empty["hist"] = {
+        "first": first, "last": last,
+        "totals": store.totals(db, domain, dr.start, dr.end, attr_key),
+        "prev": store.totals(db, domain, prev_start, prev_end, attr_key),
+        "prev_range": (prev_start, prev_end),
+        "series": store.series(db, domain, dr.start, dr.end, attr_key),
+        "campaigns": store.campaigns(db, domain, dr.start, dr.end, attr_key),
+        "breakdown": (store.breakdown(db, domain, cur_kind, dr.start, dr.end, attr_key)
+                      if cur_kind else []),
+        "enabled_kinds": enabled_kinds,
+    }
+    return empty
 
 
 @router.get("/direct/export")
@@ -122,3 +177,71 @@ def ui_direct_login(domain: str = Form(...), login: str = Form(""), token: str =
     return RedirectResponse(
         url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303
     )
+
+
+@router.post("/ui/direct/collect-settings")
+def ui_direct_collect_settings(domain: str = Form(...), goals: str = Form(""),
+                               attribution: str = Form(""),
+                               breakdowns: list[str] = Form(default=[])):
+    """Что именно собирать по домену: цели, модель атрибуции, набор разрезов."""
+    from app.credentials import set_cred
+    from app.providers.yandex_direct import YandexDirectProvider
+
+    domain = (domain or "").strip()
+    if not domain:
+        return RedirectResponse(url=f"{BP}/direct?msg={quote('Не указан домен.')}",
+                                status_code=303)
+
+    goals_clean = ",".join(g.strip() for g in goals.split(",") if g.strip().isdigit())
+    attr = (attribution or "").strip().upper()
+    if attr not in ("LC", "FC", "LSC", "LYDC", "AUTO"):
+        attr = ""
+    kinds = ",".join(k for k in breakdowns if k in YandexDirectProvider.BREAKDOWNS)
+
+    set_cred(f"direct_goals:{domain}", goals_clean)
+    set_cred(f"direct_attribution:{domain}", attr)
+    set_cred(f"direct_breakdowns:{domain}", kinds)
+
+    msg = ("Настройки сбора сохранены. Новые разрезы и атрибуция появятся после "
+           "ближайшего сбора — можно запустить его кнопкой.")
+    return RedirectResponse(
+        url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)
+
+
+def _collect_in_thread(domain: str, days: int | None) -> None:
+    """Сбор в фоне: длинная история занимает минуты, держать HTTP-запрос нельзя.
+
+    Своя сессия БД — сессия запроса закроется сразу после редиректа.
+    """
+    def _run():
+        from app.db.base import SessionLocal
+        from app.services import direct_collect
+
+        db = SessionLocal()
+        try:
+            if days:
+                direct_collect.backfill(db, domain, days)
+            else:
+                direct_collect.collect(db, domain,
+                                       direct_collect.compute_window(db, domain),
+                                       job_type="manual")
+        except Exception:  # noqa: BLE001 — уже записано в журнал сборов
+            logging.getLogger(__name__).exception("Директ: ручной сбор для %s упал", domain)
+        finally:
+            db.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@router.post("/ui/direct/collect")
+def ui_direct_collect(domain: str = Form(...), days: int = Form(0)):
+    """Собрать сейчас: обычное окно (days=0) или историю за N дней."""
+    domain = (domain or "").strip()
+    if not domain:
+        return RedirectResponse(url=f"{BP}/direct?msg={quote('Не указан домен.')}",
+                                status_code=303)
+    _collect_in_thread(domain, days if days > 0 else None)
+    msg = (f"Запущена загрузка истории за {days} дн. — идёт в фоне, обновите страницу через минуту."
+           if days > 0 else "Сбор запущен — идёт в фоне, обновите страницу через минуту.")
+    return RedirectResponse(
+        url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)

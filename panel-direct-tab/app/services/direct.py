@@ -40,6 +40,17 @@ def _goals_for(domain) -> list[str]:
     return [g.strip() for g in raw.replace(";", ",").split(",") if g.strip()]
 
 
+def _attribution_for(domain) -> list[str] | None:
+    """Модель атрибуции конверсий: на домен или общая. Пусто = по умолчанию."""
+    from app.credentials import get_cred
+
+    raw = ""
+    if domain:
+        raw = get_cred(f"direct_attribution:{domain}") or ""
+    raw = (raw or get_cred("direct_attribution") or "").strip().upper()
+    return [raw] if raw in ("LC", "FC", "LSC", "LYDC", "AUTO") else None
+
+
 def _empty(connected: bool, error: str | None = None, has_conversions: bool = False) -> dict:
     return {
         "connected": connected,
@@ -64,10 +75,14 @@ def direct_overview(domain, dr) -> dict:
 
     goals = _goals_for(domain)
     has_conv = bool(goals)
+    # Та же модель атрибуции, что и у сбора истории. Иначе на одной странице
+    # живые конверсии и конверсии из истории считались бы по разным методикам
+    # и не сходились бы между собой.
+    attribution = _attribution_for(domain) if goals else None
 
     try:
-        camp_rows = provider.campaigns(domain, dr, goals=goals)
-        daily_rows = provider.daily(domain, dr, goals=goals)
+        camp_rows = provider.campaigns(domain, dr, goals=goals, attribution=attribution)
+        daily_rows = provider.daily(domain, dr, goals=goals, attribution=attribution)
     except DirectError as exc:
         return _empty(connected=True, error=str(exc), has_conversions=has_conv)
     except Exception as exc:  # noqa: BLE001 — на вкладке лучше показать текст, чем 500

@@ -27,9 +27,24 @@ HERE = Path(__file__).resolve().parent
 NEW_FILES = [
     ("app/providers/yandex_direct.py", "app/providers/yandex_direct.py"),
     ("app/services/direct.py", "app/services/direct.py"),
+    ("app/services/direct_store.py", "app/services/direct_store.py"),
+    ("app/services/direct_collect.py", "app/services/direct_collect.py"),
+    ("app/db/models_direct.py", "app/db/models_direct.py"),
     ("app/api/routes_direct.py", "app/api/routes_direct.py"),
     ("app/templates/direct.html", "app/templates/direct.html"),
 ]
+
+# Врезка ночного сбора Директа в общий прогон панели. Отдельный try — чтобы
+# отвалившийся Директ (протух токен, не одобрена заявка) не ронял сбор GSC и
+# Вебмастера, который идёт в той же функции.
+JOBS_HOOK = """
+    # --- Яндекс Директ: собственная история по доменам (добавлено вкладкой «Директ») ---
+    try:
+        from app.services import direct_collect
+        direct_collect.run_daily(db)
+    except Exception:  # noqa: BLE001 - Директ не должен ронять сбор поисковых источников
+        logger.exception("Директ: ночной сбор не удался")
+"""
 
 
 def _backup(path: Path) -> None:
@@ -115,6 +130,34 @@ def patch_nav(app_root: Path) -> None:
     print("• nav.html — добавлен пункт меню «Директ».")
 
 
+def patch_jobs(app_root: Path) -> None:
+    """Врезает сбор Директа в конец ``run_daily_collect`` планировщика панели."""
+    path = app_root / "app" / "scheduler" / "jobs.py"
+    if not path.is_file():
+        print("• scheduler/jobs.py не найден — ночной сбор Директа не подключён.")
+        return
+    text = path.read_text(encoding="utf-8")
+    if "direct_collect.run_daily" in text:
+        print("• scheduler/jobs.py — ночной сбор Директа уже подключён, пропускаю.")
+        return
+
+    start = text.find("def run_daily_collect(")
+    if start == -1:
+        print("• scheduler/jobs.py: не найдена run_daily_collect — подключите сбор Директа вручную.")
+        return
+    # первый `return results` внутри этой функции — её выход
+    marker = "\n    return results\n"
+    pos = text.find(marker, start)
+    if pos == -1:
+        print("• scheduler/jobs.py: не найден выход из run_daily_collect — подключите вручную.")
+        return
+
+    _backup(path)
+    text = text[:pos] + "\n" + JOBS_HOOK + text[pos:]
+    path.write_text(text, encoding="utf-8")
+    print("• scheduler/jobs.py — ночной сбор Директа подключён.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Установка вкладки «Директ» в панель.")
     ap.add_argument("--app-root", default=".",
@@ -129,6 +172,7 @@ def main() -> int:
     copy_new_files(app_root)
     patch_main(app_root)
     patch_nav(app_root)
+    patch_jobs(app_root)
     print("\nГотово. Осталось перезапустить службу панели, чтобы вкладка появилась.")
     return 0
 
