@@ -29,6 +29,7 @@ NEW_FILES = [
     ("app/services/direct.py", "app/services/direct.py"),
     ("app/services/direct_store.py", "app/services/direct_store.py"),
     ("app/services/direct_collect.py", "app/services/direct_collect.py"),
+    ("app/services/direct_changes.py", "app/services/direct_changes.py"),
     ("app/db/models_direct.py", "app/db/models_direct.py"),
     ("app/api/routes_direct.py", "app/api/routes_direct.py"),
     ("app/templates/direct.html", "app/templates/direct.html"),

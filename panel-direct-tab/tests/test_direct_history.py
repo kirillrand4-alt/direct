@@ -15,7 +15,9 @@ import sys
 import tempfile
 from datetime import date, timedelta
 
-os.environ.setdefault("DB_URL", "sqlite:///" + tempfile.mktemp(suffix=".db"))
+# ВАЖНО: настройка называется database_url → переменная DATABASE_URL.
+# С неверным именем тесты писали бы в боевую БД панели и копили состояние.
+os.environ["DATABASE_URL"] = "sqlite:///" + tempfile.mktemp(suffix=".db")
 os.environ.setdefault("ENABLE_SCHEDULER", "false")
 sys.path.insert(0, os.getcwd())
 

@@ -62,6 +62,16 @@ def settings_for(domain: str) -> tuple[list[str], str, list[str]]:
     return goals, attribution, kinds
 
 
+def _flag(*keys: str) -> bool:
+    """Булев признак из хранилища кредов: на домен либо общий."""
+    from app.credentials import get_cred
+
+    for k in keys:
+        if (get_cred(k) or "").strip().lower() in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
 def compute_window(db: Session, domain: str, today: date | None = None) -> _Range:
     """Какой период тянуть в очередной раз."""
     today = today or date.today()
@@ -102,6 +112,19 @@ def collect(db: Session, domain: str, dr, job_type: str = "daily") -> int:
                 db, domain, kind, attr_key,
                 provider.breakdown_daily(domain, dr, kind, goals or None, attr_arg),
                 id_field, text_field)
+        # Журнал изменений настроек. В своём try: это дополнительная польза, и
+        # она не должна лишать нас статистики, если один из сервисов Директа
+        # ответил ошибкой (например, не принял имя поля).
+        try:
+            types = ["campaign", "bid_modifier"]
+            if _flag(f"direct_track_bids:{domain}", "direct_track_bids"):
+                types.append("keyword_bid")
+            from app.services import direct_changes
+            direct_changes.sync(db, domain, types)
+        except Exception:  # noqa: BLE001
+            logger.exception("Директ: сверка настроек для %s не удалась", domain)
+            db.rollback()
+
         db.commit()
 
         run = db.get(DirectCollectRun, run_id)

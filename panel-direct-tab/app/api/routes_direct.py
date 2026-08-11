@@ -83,15 +83,22 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
 
     kinds = list(YandexDirectProvider.BREAKDOWNS)
     empty = {"hist": None, "kind": kind if kind in kinds else None, "kinds": kinds,
-             "goals": "", "attribution": "", "breakdowns": "", "last_run": None}
+             "goals": "", "attribution": "", "breakdowns": "", "last_run": None,
+             "changes": [], "field_titles": {}, "track_bids": False}
     if not domain:
         return empty
 
     goals, attribution, enabled_kinds = direct_collect.settings_for(domain)
     attr_key = attribution if goals else ""
+    from app.credentials import get_cred
+    from app.services import direct_changes
     empty.update({"goals": ",".join(goals), "attribution": attribution,
                   "breakdowns": ",".join(enabled_kinds),
-                  "last_run": store.last_run(db, domain)})
+                  "last_run": store.last_run(db, domain),
+                  # журнал изменений не зависит от наличия статистики
+                  "changes": direct_changes.recent(db, domain, limit=60),
+                  "field_titles": direct_changes.FIELD_TITLES,
+                  "track_bids": bool((get_cred(f"direct_track_bids:{domain}") or "").strip())})
 
     first, last = store.history_bounds(db, domain)
     if first is None:
@@ -182,7 +189,8 @@ def ui_direct_login(domain: str = Form(...), login: str = Form(""), token: str =
 @router.post("/ui/direct/collect-settings")
 def ui_direct_collect_settings(domain: str = Form(...), goals: str = Form(""),
                                attribution: str = Form(""),
-                               breakdowns: list[str] = Form(default=[])):
+                               breakdowns: list[str] = Form(default=[]),
+                               track_bids: str = Form("")):
     """Что именно собирать по домену: цели, модель атрибуции, набор разрезов."""
     from app.credentials import set_cred
     from app.providers.yandex_direct import YandexDirectProvider
@@ -201,6 +209,7 @@ def ui_direct_collect_settings(domain: str = Form(...), goals: str = Form(""),
     set_cred(f"direct_goals:{domain}", goals_clean)
     set_cred(f"direct_attribution:{domain}", attr)
     set_cred(f"direct_breakdowns:{domain}", kinds)
+    set_cred(f"direct_track_bids:{domain}", "1" if track_bids else "")
 
     msg = ("Настройки сбора сохранены. Новые разрезы и атрибуция появятся после "
            "ближайшего сбора — можно запустить его кнопкой.")

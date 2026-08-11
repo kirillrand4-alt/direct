@@ -189,6 +189,30 @@
   <p><small>Истории пока нет — ночной сбор ещё не отработал. Можно запустить сбор вручную кнопкой ниже.</small></p>
   {% endif %}
 
+  {% if changes %}
+  <h4 style="margin-top:1rem">Изменения настроек</h4>
+  <figure>
+    <table role="grid">
+      <thead><tr><th>Замечено</th><th>Объект</th><th>Что</th><th>Было</th><th>Стало</th></tr></thead>
+      <tbody>
+      {% for ch in changes %}
+        <tr>
+          <td><small>{{ ch.detected_at.strftime('%d.%m %H:%M') }}</small></td>
+          <td>{{ ch.object_name or ch.object_id }}</td>
+          <td>{{ field_titles.get(ch.field, ch.field) }}</td>
+          <td><small>{{ ch.old_value or '—' }}</small></td>
+          <td><small><strong>{{ ch.new_value or '—' }}</strong></small></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+  <p><small><strong>«Замечено» — это когда изменение увидел сбор, а не когда его внесли.</strong>
+    Точное время правки Директ через API не сообщает: читаемого журнала там нет,
+    отдаются только идентификаторы изменившихся объектов. Поэтому правка попадает
+    сюда ближайшей ночью после того, как её сделали.</small></p>
+  {% endif %}
+
   {# состояние сбора и ручной запуск #}
   <footer>
     {% if last_run %}
@@ -262,6 +286,16 @@
       {% endfor %}
       <small style="display:block">Каждый разрез — отдельный отчёт при каждом сборе: больше баллов
         и больше строк в БД. Фразы и поисковые запросы самые объёмные.</small>
+    </fieldset>
+    <fieldset>
+      <legend><small>Журнал изменений настроек</small></legend>
+      <small style="display:block;margin-bottom:.4rem">Настройки кампаний и корректировки ставок
+        сверяются каждую ночь всегда. Ставки по отдельным фразам — по желанию: на большом
+        аккаунте это десятки тысяч объектов и заметный расход баллов.</small>
+      <label style="display:inline-block">
+        <input type="checkbox" name="track_bids" value="1"{% if track_bids %} checked{% endif %}>
+        Сторожить и ставки по ключевым фразам
+      </label>
     </fieldset>
     <button type="submit" class="secondary">Сохранить настройки сбора</button>
   </form>

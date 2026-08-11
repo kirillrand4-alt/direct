@@ -118,6 +118,61 @@ class DirectBreakdownDaily(Base):
     conversions: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class DirectSettingsSnapshot(Base):
+    """Последнее известное состояние объекта Директа (кампания, корректировка…).
+
+    Хранится **только текущий** снапшот на объект, а не история снапшотов: история
+    живёт в ``direct_change`` в виде отличий. Иначе таблица росла бы на весь
+    аккаунт каждую ночь, отдавая при этом ту же информацию.
+
+    ``payload`` — канонический JSON (ключи отсортированы), ``payload_hash`` — его
+    хеш: сравнение хешей отсекает неизменившиеся объекты, не разбирая JSON.
+    """
+
+    __tablename__ = "direct_settings_snapshot"
+    __table_args__ = (
+        UniqueConstraint("domain", "object_type", "object_id", name="uq_direct_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    object_type: Mapped[str] = mapped_column(String(24))  # campaign | bid_modifier | keyword_bid
+    object_id: Mapped[str] = mapped_column(String(32))
+    object_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class DirectChange(Base):
+    """Журнал изменений настроек — то, чего API Директа не отдаёт.
+
+    Читаемой истории изменений в API v5 нет: ``Changes.check`` возвращает только
+    идентификаторы изменившихся объектов и метку времени. Поэтому журнал строим
+    сами, сравнивая свежий снапшот с предыдущим.
+
+    ``detected_at`` — когда **мы заметили** изменение, а не когда его внесли.
+    Точное время правки Директ не сообщает, и выдавать одно за другое нельзя:
+    при суточном сборе правка попадает в журнал следующей ночью.
+    """
+
+    __tablename__ = "direct_change"
+    __table_args__ = (
+        Index("ix_direct_change_dom_at", "domain", "detected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    object_type: Mapped[str] = mapped_column(String(24))
+    object_id: Mapped[str] = mapped_column(String(32))
+    object_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), default="changed")  # added | changed | removed
+    field: Mapped[str] = mapped_column(String(64))
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class DirectCollectRun(Base):
     """Журнал сборов Директа.
 

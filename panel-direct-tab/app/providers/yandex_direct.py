@@ -184,6 +184,119 @@ class YandexDirectProvider:
             "Отчёт Директа не готов за отведённое время — попробуйте позже или сузьте период."
         )
 
+    # ---------- обычные сервисы API v5 (не Reports) ---------- #
+    def _call(self, domain, service: str, method: str, params: dict) -> dict:
+        """Вызов обычного сервиса v5: ``{"method": ..., "params": ...}`` → ``result``.
+
+        Отличается от ``_report`` во всём: другой URL (сервис в пути), другое тело,
+        ответ — JSON, а не TSV, и нет очереди с ``retryIn``. Поэтому отдельный метод,
+        а не параметр к существующему.
+        """
+        url = self._url().rsplit("/", 1)[0] + f"/{service}"
+        headers = {
+            "Authorization": f"Bearer {self._token(domain)}",
+            "Accept-Language": "ru",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        login = self._login(domain)
+        if login:
+            headers["Client-Login"] = login
+
+        try:
+            resp = httpx.post(url, json={"method": method, "params": params},
+                              headers=headers, timeout=120)
+        except httpx.HTTPError as exc:
+            raise DirectError(f"Директ недоступен: {exc}") from exc
+
+        if resp.status_code != 200:
+            raise DirectError(f"Директ HTTP {resp.status_code}: {_error_text(resp)}")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise DirectError("Директ вернул не-JSON") from exc
+        if "error" in payload:
+            raise DirectError(f"Директ отклонил запрос: {_error_text(resp)}")
+        return payload.get("result") or {}
+
+    def _paged(self, domain, service: str, params: dict, key: str,
+               limit: int = 1000) -> list[dict]:
+        """``get`` с постраничным обходом: Директ отдаёт ``LimitedBy`` — смещение
+        следующей страницы. Без обхода у крупного аккаунта молча потерялся бы хвост."""
+        out: list[dict] = []
+        offset = 0
+        while True:
+            page = dict(params)
+            page["Page"] = {"Limit": limit, "Offset": offset}
+            result = self._call(domain, service, "get", page)
+            rows = result.get(key) or []
+            out.extend(rows)
+            limited_by = result.get("LimitedBy")
+            if not rows or limited_by is None:
+                break
+            offset = int(limited_by)
+        return out
+
+    # Настройки кампании, которые имеет смысл сторожить. Только общие для всех
+    # типов кампаний поля — типоспецифичные (BiddingStrategy) запрашиваются
+    # отдельным списком и переживают отсутствие.
+    CAMPAIGN_FIELDS = [
+        "Id", "Name", "Type", "State", "Status", "StatusPayment",
+        "StartDate", "EndDate", "Currency", "DailyBudget",
+        "TimeTargeting", "NegativeKeywords", "BlockedIps", "ExcludedSites",
+    ]
+
+    def get_campaigns(self, domain) -> list[dict]:
+        """Полные настройки всех кампаний аккаунта (для снапшота и сравнения)."""
+        params = {
+            "SelectionCriteria": {},
+            "FieldNames": list(self.CAMPAIGN_FIELDS),
+            "TextCampaignFieldNames": ["BiddingStrategy"],
+        }
+        try:
+            return self._paged(domain, "campaigns", params, "Campaigns")
+        except DirectError as exc:
+            # Набор полей зависит от типов кампаний в аккаунте: если Директ не
+            # принял типоспецифичный список — пробуем без него, чтобы не терять
+            # всё остальное из-за одной стратегии.
+            if "BiddingStrategy" not in str(exc):
+                raise
+            logger.warning("Директ: BiddingStrategy не принят (%s) — читаю без стратегии", exc)
+            params.pop("TextCampaignFieldNames", None)
+            return self._paged(domain, "campaigns", params, "Campaigns")
+
+    def get_bid_modifiers(self, domain) -> list[dict]:
+        """Корректировки ставок: мобильные, демография, регионы, ретаргетинг."""
+        params = {
+            "SelectionCriteria": {},
+            "FieldNames": ["Id", "CampaignId", "AdGroupId", "Type"],
+            "MobileAdjustmentFieldNames": ["BidModifier"],
+            "DesktopAdjustmentFieldNames": ["BidModifier"],
+            "DemographicsAdjustmentFieldNames": ["BidModifier", "Gender", "Age"],
+            "RegionalAdjustmentFieldNames": ["BidModifier", "RegionId"],
+            "RetargetingAdjustmentFieldNames": ["BidModifier", "RetargetingConditionId"],
+        }
+        return self._paged(domain, "bidmodifiers", params, "BidModifiers")
+
+    def get_keyword_bids(self, domain) -> list[dict]:
+        """Ставки по ключевым фразам.
+
+        Объём: десятки тысяч строк на крупном аккаунте, поэтому включается
+        отдельной галочкой и по умолчанию выключено.
+        """
+        params = {"SelectionCriteria": {}, "FieldNames": ["KeywordId", "CampaignId",
+                                                          "AdGroupId", "Bid", "ContextBid"]}
+        return self._paged(domain, "bids", params, "Bids")
+
+    def changes_since(self, domain, timestamp: str) -> dict:
+        """Что изменилось с момента ``timestamp`` (ISO 8601, UTC, вида
+        ``2026-08-10T12:00:00Z``).
+
+        Возвращает сырой ``result``: сервис отдаёт только ID изменившихся объектов
+        и метку времени, без подробностей — что именно поменялось, приходится
+        выяснять сравнением снапшотов.
+        """
+        return self._call(domain, "changes", "checkCampaigns", {"Timestamp": timestamp})
+
     # ---------- готовые отчёты (живой просмотр) ---------- #
     def campaigns(self, domain, dr, goals=None, attribution=None) -> list[dict]:
         """Итоги за период в разрезе кампаний."""
