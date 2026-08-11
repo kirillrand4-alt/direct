@@ -1,0 +1,14 @@
+# Секреты — токены и client_secret
+.env
+
+# Выгрузки
+*.csv
+*.tsv
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
