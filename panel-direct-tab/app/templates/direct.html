@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Директ · SEO Статистика{% endblock %}
+{% block content %}
+<h2>Яндекс Директ</h2>
+
+{% if msg %}<article><strong>{{ msg }}</strong></article>{% endif %}
+
+{% if not token_set %}
+<article>
+  <p>⚠️ Чтобы видеть статистику Директа, вставьте OAuth-токен ниже в блоке
+    «Настройки Директа» (или в <a href="{{ base_path }}/admin">Настройках</a>, если добавите поле туда).</p>
+</article>
+{% endif %}
+
+{% if not domains %}
+<article><p>Пока нет ни одного домена. <a href="{{ base_path }}/admin">Добавьте сайт в Настройках</a>.</p></article>
+{% else %}
+<form method="get" action="{{ base_path }}/direct" class="grid">
+  <label>Домен
+    <select name="domain" onchange="this.form.submit()">
+      {% for d in domains %}
+      <option value="{{ d.domain }}" {% if d.domain == cur_domain %}selected{% endif %}>{{ d.domain }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>С <input type="date" name="start" value="{{ range.start }}"></label>
+  <label>По <input type="date" name="end" value="{{ range.end }}"></label>
+  <label>&nbsp;<button type="submit">Показать</button></label>
+</form>
+{% if login %}<p><small>Аккаунт (Client-Login): <code>{{ login }}</code></small></p>{% endif %}
+
+{% if error %}
+<article><mark>Ошибка Директа: {{ error }}</mark></article>
+{% elif not connected %}
+<article><p><small>Для домена <strong>{{ cur_domain }}</strong> не задан токен Директа. Задайте общий или
+  отдельный токен в блоке «Настройки Директа» ниже.</small></p></article>
+{% elif totals %}
+<div class="grid">
+  <article><hgroup><h3>{{ totals.impressions|numfmt }}</h3><p>Показы</p></hgroup></article>
+  <article><hgroup><h3>{{ totals.clicks|numfmt }}</h3><p>Клики</p></hgroup></article>
+  <article><hgroup><h3>{{ totals.ctr|ctr }}</h3><p>CTR</p></hgroup></article>
+  <article><hgroup><h3>{{ totals.cost|numfmt }} ₽</h3><p>Расход</p></hgroup></article>
+</div>
+<div class="grid">
+  <article><hgroup><h3>{{ '%.2f'|format(totals.cpc) }} ₽</h3><p>Цена клика</p></hgroup></article>
+  {% if has_conversions %}
+  <article><hgroup><h3>{{ totals.conversions|numfmt }}</h3><p>Конверсии</p></hgroup></article>
+  <article><hgroup><h3>{% if totals.conversions %}{{ '%.0f'|format(totals.cpa) }} ₽{% else %}—{% endif %}</h3><p>Цена конверсии</p></hgroup></article>
+  {% endif %}
+</div>
+
+<article>
+  <header>Динамика по дням</header>
+  {% if daily %}<canvas id="dtrend" height="90"></canvas>
+  {% else %}<p><small>Нет данных за период.</small></p>{% endif %}
+</article>
+
+<p><a href="{{ base_path }}/direct/export?domain={{ cur_domain }}&start={{ range.start }}&end={{ range.end }}"
+      role="button" class="outline">Экспорт по кампаниям (CSV)</a></p>
+
+{% if campaigns %}
+<article>
+  <header>По кампаниям</header>
+  <figure>
+  <table class="sortable">
+    <thead><tr>
+      <th>Кампания</th><th>Показы</th><th>Клики</th><th>CTR</th><th>Расход, ₽</th><th>CPC, ₽</th>
+      {% if has_conversions %}<th>Конв.</th><th>CPA, ₽</th>{% endif %}
+    </tr></thead>
+    <tbody>
+    {% for c in campaigns %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td>{{ c.impressions|numfmt }}</td>
+        <td>{{ c.clicks|numfmt }}</td>
+        <td>{{ c.ctr|ctr }}</td>
+        <td>{{ c.cost|numfmt }}</td>
+        <td>{{ '%.2f'|format(c.cpc) }}</td>
+        {% if has_conversions %}
+        <td>{{ c.conversions|numfmt }}</td>
+        <td>{% if c.conversions %}{{ '%.0f'|format(c.cost / c.conversions) }}{% else %}—{% endif %}</td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </figure>
+</article>
+{% endif %}
+{% endif %}
+
+<details style="margin-top:1.2rem">
+  <summary>Настройки Директа</summary>
+  <form method="post" action="{{ base_path }}/ui/direct/token" class="grid">
+    <label>Общий OAuth-токен Директа
+      <input type="password" name="token"
+             placeholder="{% if token_set %}задан — вставьте новый, чтобы заменить{% else %}y0_…{% endif %}">
+    </label>
+    <label>&nbsp;<button type="submit" class="secondary">Сохранить токен</button></label>
+  </form>
+  {% if cur_domain %}
+  <form method="post" action="{{ base_path }}/ui/direct/login" class="grid">
+    <input type="hidden" name="domain" value="{{ cur_domain }}">
+    <label>Client-Login для {{ cur_domain }}<br><small>для агентских/мультиаккаунтов; иначе оставьте пустым</small>
+      <input name="login" value="{{ login or '' }}">
+    </label>
+    <label>Отдельный токен для {{ cur_domain }}<br><small>если у домена свой аккаунт Директа</small>
+      <input type="password" name="token" placeholder="необязательно">
+    </label>
+    <label>&nbsp;<button type="submit" class="secondary">Сохранить для домена</button></label>
+  </form>
+  {% endif %}
+  <p><small>Как получить токен: <a href="https://oauth.yandex.ru/" target="_blank" rel="noopener">oauth.yandex.ru</a>
+    → приложение с правом «Использование API Яндекс Директа» → OAuth-токен. Токен хранится в панели
+    в зашифрованном виде. Статистика тянется живьём из сервиса Reports и кэшируется на время
+    (сброс — кнопкой 🧹 в шапке).</small></p>
+</details>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if daily %}
+<script>
+  const d = {{ daily|tojson }};
+  new Chart(document.getElementById('dtrend'), {
+    type: 'line',
+    data: {
+      labels: d.map(x => x.date),
+      datasets: [
+        {label: 'Клики', data: d.map(x => x.clicks), borderColor: '#1095c1', yAxisID: 'y', tension: 0},
+        {label: 'Показы', data: d.map(x => x.impressions), borderColor: '#d93526', yAxisID: 'y1', tension: 0},
+        {label: 'Расход, ₽', data: d.map(x => x.cost), borderColor: '#b8902f',
+         backgroundColor: 'rgba(184,144,47,.18)', yAxisID: 'yCost', tension: 0, fill: true}
+      ]
+    },
+    options: {
+      interaction: {mode: 'index', intersect: false},
+      scales: {
+        y: {position: 'left', title: {display: true, text: 'Клики'}},
+        y1: {position: 'right', grid: {drawOnChartArea: false}, title: {display: true, text: 'Показы'}},
+        yCost: {position: 'right', grid: {drawOnChartArea: false}, title: {display: true, text: '₽'}}
+      }
+    }
+  });
+</script>
+{% endif %}
+{% endblock %}
