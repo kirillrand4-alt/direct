@@ -195,25 +195,43 @@ def series(db: Session, domain: str, start: date_type, end: date_type,
 
 def campaigns(db: Session, domain: str, start: date_type, end: date_type,
               attribution: str = "") -> list[dict]:
-    """Кампании за период — суммы по дням, свежее имя кампании."""
+    """Кампании за период: суммы по дням + имя на последний день периода.
+
+    Имя берётся отдельным запросом, а не ``max(campaign_name)`` в агрегате.
+    ``max`` по строке — это лексикографический максимум, а не самое свежее
+    значение: после переименования «Поиск — Москва» → «Поиск — МСК» агрегат
+    вернул бы старое имя, потому что оно больше по алфавиту. Кампании
+    переименовывают регулярно, так что это не теоретический случай.
+    """
+    where = (DirectCampaignDaily.domain == domain,
+             DirectCampaignDaily.attribution == attribution,
+             DirectCampaignDaily.date >= start, DirectCampaignDaily.date <= end)
+
     rows = db.execute(
         select(
             DirectCampaignDaily.campaign_id,
-            func.max(DirectCampaignDaily.campaign_name),
             func.sum(DirectCampaignDaily.impressions),
             func.sum(DirectCampaignDaily.clicks),
             func.sum(DirectCampaignDaily.cost),
             func.sum(DirectCampaignDaily.conversions),
-        )
-        .where(DirectCampaignDaily.domain == domain,
-               DirectCampaignDaily.attribution == attribution,
-               DirectCampaignDaily.date >= start, DirectCampaignDaily.date <= end)
-        .group_by(DirectCampaignDaily.campaign_id)
+        ).where(*where).group_by(DirectCampaignDaily.campaign_id)
     ).all()
-    out = [{"campaign_id": cid, "campaign_name": name or cid,
+
+    # По возрастанию даты: каждая следующая строка перетирает предыдущую, так что
+    # в словаре остаётся имя из самого позднего дня. Пустые имена пропускаем —
+    # иначе свежая строка без названия затёрла бы нормальное имя.
+    names: dict[str, str] = {}
+    for cid, name in db.execute(
+        select(DirectCampaignDaily.campaign_id, DirectCampaignDaily.campaign_name)
+        .where(*where).order_by(DirectCampaignDaily.date)
+    ).all():
+        if name:
+            names[cid] = name
+
+    out = [{"campaign_id": cid, "campaign_name": names.get(cid) or cid,
             "impressions": int(i or 0), "clicks": int(c or 0),
             "cost": float(co or 0), "conversions": int(cv or 0)}
-           for cid, name, i, c, co, cv in rows]
+           for cid, i, c, co, cv in rows]
     out.sort(key=lambda r: r["cost"], reverse=True)
     return out
 

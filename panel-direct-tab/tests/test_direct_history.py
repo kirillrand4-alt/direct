@@ -122,6 +122,50 @@ def test_breakdown_merges_duplicate_keys():
         db.close()
 
 
+def test_renamed_campaign_shows_newest_name():
+    """После переименования в таблице должно быть свежее имя.
+
+    Регрессия: раньше имя бралось как ``max(campaign_name)`` в агрегате, а это
+    лексикографический максимум — «Поиск — Москва» больше «Поиск — МСК», и
+    показывалось старое название.
+    """
+    db = SessionLocal()
+    try:
+        dom, d1 = "rename.example", date(2026, 9, 1)
+        d2 = d1 + timedelta(days=1)
+        store.save_campaigns(db, dom, "", [{
+            "Date": d1.isoformat(), "CampaignId": "111", "CampaignName": "Поиск — Москва",
+            "Impressions": "100", "Clicks": "10", "Cost": "100"}])
+        store.save_campaigns(db, dom, "", [{
+            "Date": d2.isoformat(), "CampaignId": "111", "CampaignName": "Поиск — МСК",
+            "Impressions": "100", "Clicks": "10", "Cost": "100"}])
+        db.commit()
+        rows = store.campaigns(db, dom, d1, d2)
+        assert rows[0]["campaign_name"] == "Поиск — МСК", rows[0]["campaign_name"]
+        # суммы при этом должны остаться по всей кампании, а не по одному дню
+        assert rows[0]["clicks"] == 20, rows[0]
+    finally:
+        db.close()
+
+
+def test_campaign_without_name_keeps_previous():
+    """Строка без названия не должна затирать нормальное имя."""
+    db = SessionLocal()
+    try:
+        dom, d1 = "noname.example", date(2026, 9, 10)
+        d2 = d1 + timedelta(days=1)
+        store.save_campaigns(db, dom, "", [{
+            "Date": d1.isoformat(), "CampaignId": "222", "CampaignName": "РСЯ — Россия",
+            "Impressions": "10", "Clicks": "1", "Cost": "10"}])
+        store.save_campaigns(db, dom, "", [{
+            "Date": d2.isoformat(), "CampaignId": "222", "CampaignName": "",
+            "Impressions": "10", "Clicks": "1", "Cost": "10"}])
+        db.commit()
+        assert store.campaigns(db, dom, d1, d2)[0]["campaign_name"] == "РСЯ — Россия"
+    finally:
+        db.close()
+
+
 def test_window_widens_for_late_revisions():
     """Окно очередного сбора должно заходить назад на REFETCH_DAYS от последнего
     успешного дня — Директ правит свежие цифры несколько суток."""
