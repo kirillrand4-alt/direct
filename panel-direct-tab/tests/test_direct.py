@@ -39,7 +39,7 @@ def _creds(**kv):
 
 @respx.mock
 def test_report_200_parses_tsv(monkeypatch):
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
     respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_CAMPAIGNS))
     rows = YandexDirectProvider().campaigns("abac-kompressor.ru", _dr())
     assert rows[0]["CampaignName"] == "Поиск — Москва"
@@ -49,7 +49,7 @@ def test_report_200_parses_tsv(monkeypatch):
 @respx.mock
 def test_report_202_then_200(monkeypatch):
     """201/202 = очередь: повторяем тот же запрос, пока не 200."""
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
     monkeypatch.setattr("app.providers.yandex_direct.time.sleep", lambda *_: None)
     route = respx.post(REPORTS_URL)
     route.side_effect = [
@@ -64,7 +64,7 @@ def test_report_202_then_200(monkeypatch):
 @respx.mock
 def test_money_not_in_micros_header(monkeypatch):
     """Провайдер обязан слать returnMoneyInMicros: false и Bearer-токен."""
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
     captured = {}
 
     def handler(request):
@@ -111,7 +111,7 @@ def test_overview_not_connected(monkeypatch):
 
 @respx.mock
 def test_overview_aggregates(monkeypatch):
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
     respx.post(REPORTS_URL).mock(
         side_effect=[
             httpx.Response(200, text=TSV_CAMPAIGNS),  # campaigns()
@@ -134,7 +134,9 @@ def test_overview_aggregates(monkeypatch):
 
 @respx.mock
 def test_overview_error_is_caught(monkeypatch):
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    # домен теста — d.ru, к нему и должен быть привязан общий токен
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
     respx.post(REPORTS_URL).mock(return_value=httpx.Response(400, json={"error": {
         "error_string": "Bad", "error_detail": "плохой период"}}))
     out = direct_overview("d.ru", _dr())

@@ -102,11 +102,29 @@ class YandexDirectProvider:
         return None
 
     def is_connected(self, domain: str | None) -> bool:
+        """Привязан ли к домену аккаунт Директа.
+
+        Общего токена **недостаточно**. Аккаунт Директа принадлежит одному
+        рекламному кабинету, а доменов в панели много: если считать
+        подключёнными все, статистика одного кабинета запишется под каждым
+        доменом отдельной копией, а ночной сбор сходит в API столько раз,
+        сколько доменов. Ровно это и случилось: 28 доменов — 28 одинаковых
+        копий и 28 лишних прогонов за ночь.
+
+        Поэтому связь должна быть явной: свой токен на домен, свой
+        ``Client-Login`` (агентский случай) либо домен, выбранный владельцем
+        аккаунта в настройках вкладки.
+        """
         from app.credentials import get_cred
 
-        if domain and (get_cred(f"direct_token:{domain}") or "").strip():
+        if not domain:
+            return False
+        if (get_cred(f"direct_token:{domain}") or "").strip():
             return True
-        return bool((get_cred("yandex_direct_token") or "").strip())
+        if (get_cred(f"direct_login:{domain}") or "").strip():
+            return True
+        main = (get_cred("direct_main_domain") or "").strip()
+        return bool(main) and domain == main
 
     def _url(self) -> str:
         from app.credentials import get_cred

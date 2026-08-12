@@ -84,7 +84,8 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
     kinds = list(YandexDirectProvider.BREAKDOWNS)
     empty = {"hist": None, "kind": kind if kind in kinds else None, "kinds": kinds,
              "goals": "", "attribution": "", "breakdowns": "", "last_run": None,
-             "changes": [], "field_titles": {}, "track_bids": False}
+             "changes": [], "field_titles": {}, "track_bids": False,
+             "main_domain": "", "has_own_token": False}
     if not domain:
         return empty
 
@@ -98,7 +99,9 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
                   # журнал изменений не зависит от наличия статистики
                   "changes": direct_changes.recent(db, domain, limit=60),
                   "field_titles": direct_changes.FIELD_TITLES,
-                  "track_bids": bool((get_cred(f"direct_track_bids:{domain}") or "").strip())})
+                  "track_bids": bool((get_cred(f"direct_track_bids:{domain}") or "").strip()),
+                  "main_domain": (get_cred("direct_main_domain") or "").strip(),
+                  "has_own_token": bool((get_cred(f"direct_token:{domain}") or "").strip())})
 
     first, last = store.history_bounds(db, domain)
     if first is None:
@@ -158,11 +161,16 @@ def direct_export(domain: str | None = None, start: str | None = None,
 
 
 @router.post("/ui/direct/token")
-def ui_direct_token(token: str = Form("")):
-    from app.credentials import set_cred
+def ui_direct_token(token: str = Form(""), domain: str = Form("")):
+    from app.credentials import get_cred, set_cred
 
     token = (token or "").strip()
     set_cred("yandex_direct_token", token)
+    # Общий токен принадлежит одному кабинету. Если владелец ещё не выбран —
+    # считаем им домен, с которого токен сохранили: иначе токен «подключил» бы
+    # все домены сразу и статистика одного кабинета размножилась бы по ним.
+    if token and domain and not (get_cred("direct_main_domain") or "").strip():
+        set_cred("direct_main_domain", domain.strip())
     msg = "Токен Директа сохранён." if token else "Токен Директа очищен."
     # nocache=1 → страница пересчитается сразу, минуя серверный HTML-кэш
     return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
@@ -184,6 +192,19 @@ def ui_direct_login(domain: str = Form(...), login: str = Form(""), token: str =
     return RedirectResponse(
         url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303
     )
+
+
+@router.post("/ui/direct/account-domain")
+def ui_direct_account_domain(domain: str = Form("")):
+    """Какому домену принадлежит общий токен Директа."""
+    from app.credentials import set_cred
+
+    domain = (domain or "").strip()
+    set_cred("direct_main_domain", domain)
+    msg = (f"Общий токен Директа привязан к {domain}." if domain
+           else "Привязка общего токена снята.")
+    return RedirectResponse(
+        url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)
 
 
 @router.post("/ui/direct/collect-settings")

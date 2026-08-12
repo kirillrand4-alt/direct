@@ -238,6 +238,7 @@
 <details style="margin-top:1.2rem">
   <summary>Настройки Директа</summary>
   <form method="post" action="{{ base_path }}/ui/direct/token" class="grid">
+    <input type="hidden" name="domain" value="{{ cur_domain or '' }}">
     <label>Общий OAuth-токен Директа
       <input type="password" name="token"
              placeholder="{% if token_set %}задан — вставьте новый, чтобы заменить{% else %}y0_…{% endif %}">
@@ -245,6 +246,19 @@
     <label>&nbsp;<button type="submit" class="secondary">Сохранить токен</button></label>
   </form>
   {% if cur_domain %}
+  <form method="post" action="{{ base_path }}/ui/direct/account-domain" class="grid">
+    <label>Общий токен принадлежит домену<br>
+      <small>у каждого кабинета Директа свой токен; общий работает только для выбранного здесь домена,
+        остальным задайте отдельные токены ниже</small>
+      <select name="domain">
+        <option value="">— не привязан —</option>
+        {% for d in domains %}
+        <option value="{{ d.domain }}"{% if d.domain == main_domain %} selected{% endif %}>{{ d.domain }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>&nbsp;<button type="submit" class="secondary">Сохранить привязку</button></label>
+  </form>
   <form method="post" action="{{ base_path }}/ui/direct/login" class="grid">
     <input type="hidden" name="domain" value="{{ cur_domain }}">
     <label>Client-Login для {{ cur_domain }}<br><small>для агентских/мультиаккаунтов; иначе оставьте пустым</small>

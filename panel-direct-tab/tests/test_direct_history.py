@@ -198,6 +198,9 @@ def test_daily_run_survives_a_broken_domain(monkeypatch=None):
     from app.services import direct_collect
 
     db = SessionLocal()
+    # подмены обязательно откатываем: без этого соседние тесты видят заглушки
+    orig_domains = direct_collect.connected_domains
+    orig_collect = direct_collect.collect
     try:
         direct_collect.connected_domains = lambda _db: ["bad.example"]
         def _boom(*a, **k):
@@ -206,6 +209,8 @@ def test_daily_run_survives_a_broken_domain(monkeypatch=None):
         res = direct_collect.run_daily(db)
         assert res == {"bad.example": -1}, res
     finally:
+        direct_collect.connected_domains = orig_domains
+        direct_collect.collect = orig_collect
         db.close()
 
 
@@ -218,6 +223,59 @@ def test_page_renders_with_history():
     r = client.get("/direct")
     assert r.status_code == 200, r.status_code
     assert "Директ" in r.text
+
+
+def test_general_token_connects_only_its_own_domain():
+    """Общий токен не должен «подключать» все домены панели.
+
+    Регрессия с боевого сервера: общего токена хватало, чтобы is_connected()
+    вернул True для любого домена. В панели 28 доменов — статистика одного
+    кабинета записалась 28 раз под разными именами, а ночной сбор сходил
+    в API 28 раз вместо одного.
+    """
+    from app.credentials import set_cred
+    from app.providers.yandex_direct import YandexDirectProvider
+
+    p = YandexDirectProvider()
+    set_cred("yandex_direct_token", "y0_OBSHCHIY")
+    set_cred("direct_main_domain", "")
+    # общий токен есть, владелец не назначен — не угадываем
+    assert p.is_connected("prokompressor.ru") is False
+    assert p.is_connected("meyer-corp.ru") is False
+
+    set_cred("direct_main_domain", "prokompressor.ru")
+    assert p.is_connected("prokompressor.ru") is True
+    assert p.is_connected("meyer-corp.ru") is False
+
+    # у своего токена приоритет: домен подключён независимо от привязки общего
+    set_cred("direct_token:meyer-corp.ru", "y0_SVOY")
+    assert p.is_connected("meyer-corp.ru") is True
+
+    # агентский случай: свой Client-Login тоже считается привязкой
+    set_cred("direct_login:usort.ru", "usort-client")
+    assert p.is_connected("usort.ru") is True
+    assert p.is_connected("po22.ru") is False
+
+
+def test_only_bound_domains_are_collected():
+    """connected_domains() возвращает только явно привязанные домены."""
+    from app.credentials import set_cred
+    from app.services import direct_collect
+
+    set_cred("yandex_direct_token", "y0_OBSHCHIY")
+    set_cred("direct_main_domain", "prokompressor.ru")
+
+    import app.api.routes_pages as rp
+    rp._domains = lambda db: [{"domain": d, "engines": ["gsc"]} for d in
+                              ("prokompressor.ru", "meyer-corp.ru", "po22.ru", "usort.ru")]
+    db = SessionLocal()
+    try:
+        got = sorted(direct_collect.connected_domains(db))
+        # meyer и usort привязаны в предыдущем тесте (свой токен / свой логин)
+        assert "prokompressor.ru" in got, got
+        assert "po22.ru" not in got, got
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
