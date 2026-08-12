@@ -30,6 +30,7 @@ NEW_FILES = [
     ("app/services/direct_store.py", "app/services/direct_store.py"),
     ("app/services/direct_collect.py", "app/services/direct_collect.py"),
     ("app/services/direct_changes.py", "app/services/direct_changes.py"),
+    ("app/services/metrika_resync.py", "app/services/metrika_resync.py"),
     ("app/db/models_direct.py", "app/db/models_direct.py"),
     ("app/api/routes_direct.py", "app/api/routes_direct.py"),
     ("app/templates/direct.html", "app/templates/direct.html"),
@@ -45,6 +46,30 @@ JOBS_HOOK = """
         direct_collect.run_daily(db)
     except Exception:  # noqa: BLE001 - Директ не должен ронять сбор поисковых источников
         logger.exception("Директ: ночной сбор не удался")
+"""
+
+# Еженедельный пересинк визитов Метрики: цели Roistat досылаются после визита,
+# без перекачки хвоста квалы в БД навсегда отстают от интерфейса Метрики
+# (наблюдалось: 42 в БД против 53 в интерфейсе за июль, 31 против 53 за июнь).
+SCHEDULER_HOOK = """
+    # --- Метрика: еженедельный пересинк 30-дневного хвоста визитов (вкладка «Директ») ---
+    def _metrika_resync_job():
+        def _r():
+            d = SessionLocal()
+            try:
+                from app.services import metrika_resync
+                metrika_resync.run_weekly(d)
+            except Exception:  # noqa: BLE001
+                logger.exception("Метрика: еженедельный пересинк не удался")
+            finally:
+                d.close()
+        threading.Thread(target=_r, daemon=True).start()
+
+    _scheduler.add_job(
+        _metrika_resync_job, "cron", day_of_week="sun", hour=5,
+        id="metrika_resync", max_instances=1, coalesce=True,
+        misfire_grace_time=12 * 3600, replace_existing=True,
+    )
 """
 
 
@@ -159,6 +184,27 @@ def patch_jobs(app_root: Path) -> None:
     print("• scheduler/jobs.py — ночной сбор Директа подключён.")
 
 
+def patch_scheduler_resync(app_root: Path) -> None:
+    """Врезает еженедельный пересинк Метрики перед ``_scheduler.start()``."""
+    path = app_root / "app" / "scheduler" / "jobs.py"
+    if not path.is_file():
+        print("• scheduler/jobs.py не найден — пересинк Метрики не подключён.")
+        return
+    text = path.read_text(encoding="utf-8")
+    if "metrika_resync" in text:
+        print("• scheduler/jobs.py — пересинк Метрики уже подключён, пропускаю.")
+        return
+    marker = "\n    _scheduler.start()"
+    pos = text.find(marker)
+    if pos == -1:
+        print("• scheduler/jobs.py: не найден _scheduler.start() — подключите пересинк вручную.")
+        return
+    _backup(path)
+    text = text[:pos] + "\n" + SCHEDULER_HOOK + text[pos:]
+    path.write_text(text, encoding="utf-8")
+    print("• scheduler/jobs.py — еженедельный пересинк Метрики подключён (вс, 05:00).")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Установка вкладки «Директ» в панель.")
     ap.add_argument("--app-root", default=".",
@@ -174,6 +220,7 @@ def main() -> int:
     patch_main(app_root)
     patch_nav(app_root)
     patch_jobs(app_root)
+    patch_scheduler_resync(app_root)
     print("\nГотово. Осталось перезапустить службу панели, чтобы вкладка появилась.")
     return 0
 
