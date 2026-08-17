@@ -282,10 +282,17 @@ class YandexDirectProvider:
             params.pop("TextCampaignFieldNames", None)
             return self._paged(domain, "campaigns", params, "Campaigns")
 
+    # Уровни, на которых живут корректировки. Параметр обязательный: без него
+    # сервис отвечает «Отсутствует обязательный параметр Levels» (код 8000) и не
+    # отдаёт ничего — именно поэтому корректировки долго не собирались.
+    BID_MODIFIER_LEVELS = ["CAMPAIGN", "AD_GROUP"]
+    # Сколько кампаний за раз перечислять в запасном пути (см. ниже).
+    BID_MODIFIER_CHUNK = 100
+
     def get_bid_modifiers(self, domain) -> list[dict]:
         """Корректировки ставок: мобильные, демография, регионы, ретаргетинг."""
         params = {
-            "SelectionCriteria": {},
+            "SelectionCriteria": {"Levels": list(self.BID_MODIFIER_LEVELS)},
             "FieldNames": ["Id", "CampaignId", "AdGroupId", "Type"],
             "MobileAdjustmentFieldNames": ["BidModifier"],
             "DesktopAdjustmentFieldNames": ["BidModifier"],
@@ -293,7 +300,25 @@ class YandexDirectProvider:
             "RegionalAdjustmentFieldNames": ["BidModifier", "RegionId"],
             "RetargetingAdjustmentFieldNames": ["BidModifier", "RetargetingConditionId"],
         }
-        return self._paged(domain, "bidmodifiers", params, "BidModifiers")
+        try:
+            return self._paged(domain, "bidmodifiers", params, "BidModifiers")
+        except DirectError as exc:
+            # Часть аккаунтов сверх уровней требует явного перечисления кампаний.
+            # Тогда спрашиваем их список и идём кусками: ограничение сервиса на
+            # длину CampaignIds жёстче, чем размер крупного аккаунта.
+            if "CampaignIds" not in str(exc):
+                raise
+            logger.warning("Директ: корректировки требуют список кампаний (%s) — иду по кампаниям", exc)
+            ids = [str(c.get("Id")) for c in self.get_campaigns(domain) if c.get("Id") is not None]
+            out: list[dict] = []
+            for i in range(0, len(ids), self.BID_MODIFIER_CHUNK):
+                chunk = dict(params)
+                chunk["SelectionCriteria"] = {
+                    "Levels": list(self.BID_MODIFIER_LEVELS),
+                    "CampaignIds": ids[i:i + self.BID_MODIFIER_CHUNK],
+                }
+                out += self._paged(domain, "bidmodifiers", chunk, "BidModifiers")
+            return out
 
     def get_keyword_bids(self, domain) -> list[dict]:
         """Ставки по ключевым фразам.
