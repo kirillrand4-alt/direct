@@ -214,3 +214,13 @@ def test_ensure_schema_is_idempotent():
         assert db.execute(text("SELECT COUNT(*) FROM direct_daily")).scalar_one() == before
     finally:
         db.close()
+
+
+def test_refetch_window_covers_offline_conversions():
+    """Окно перезабора должно перекрывать срок доезда офлайн-конверсий.
+
+    Квалификация лида и статус сделки приходят из CRM через Roistat спустя
+    недели после визита; Директ принимает их до 21 дня назад. С окном в 14 дней
+    конверсии, доехавшие на 15–21 день, не попадали в историю никогда.
+    """
+    assert direct_collect.REFETCH_DAYS >= 21, direct_collect.REFETCH_DAYS
