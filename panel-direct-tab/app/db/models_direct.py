@@ -60,12 +60,97 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
 }
 
 
-def ensure_direct_schema(engine) -> None:
-    """Дописать недостающие колонки в уже созданные таблицы Директа.
+# Таблицы, у которых ``goal_key`` входит в уникальный ключ. Такую колонку
+# нельзя просто дописать: ключ зашит в CREATE TABLE, а SQLite не умеет менять
+# ограничения. Поэтому таблица пересобирается — новая схема, перелив строк,
+# подмена. Значения перечислены целиком, чтобы DDL читался, а не собирался
+# метапрограммированием из моделей: одна опечатка тут стоит истории.
+_REBUILD_WITH_GOAL_KEY: dict[str, tuple[str, list[str]]] = {
+    "direct_daily": ("""
+        CREATE TABLE {new} (
+            id INTEGER NOT NULL PRIMARY KEY,
+            domain VARCHAR(255) NOT NULL,
+            date DATE NOT NULL,
+            goal_key VARCHAR(32) NOT NULL DEFAULT '',
+            attribution VARCHAR(8) NOT NULL DEFAULT '',
+            impressions INTEGER, clicks INTEGER, cost FLOAT, conversions INTEGER,
+            CONSTRAINT uq_direct_daily UNIQUE (domain, date, goal_key, attribution)
+        )""", ["domain", "date", "attribution", "impressions", "clicks", "cost",
+               "conversions"]),
+    "direct_campaign_daily": ("""
+        CREATE TABLE {new} (
+            id INTEGER NOT NULL PRIMARY KEY,
+            domain VARCHAR(255) NOT NULL,
+            date DATE NOT NULL,
+            campaign_id VARCHAR(32) NOT NULL,
+            campaign_name VARCHAR(512),
+            goal_key VARCHAR(32) NOT NULL DEFAULT '',
+            attribution VARCHAR(8) NOT NULL DEFAULT '',
+            impressions INTEGER, clicks INTEGER, cost FLOAT, conversions INTEGER,
+            CONSTRAINT uq_direct_campaign_daily
+                UNIQUE (domain, date, campaign_id, goal_key, attribution)
+        )""", ["domain", "date", "campaign_id", "campaign_name", "attribution",
+               "impressions", "clicks", "cost", "conversions"]),
+    "direct_breakdown_daily": ("""
+        CREATE TABLE {new} (
+            id INTEGER NOT NULL PRIMARY KEY,
+            domain VARCHAR(255) NOT NULL,
+            date DATE NOT NULL,
+            kind VARCHAR(16) NOT NULL,
+            key_hash VARCHAR(64) NOT NULL,
+            key_id VARCHAR(32),
+            key_text TEXT NOT NULL,
+            campaign_id VARCHAR(32),
+            goal_key VARCHAR(32) NOT NULL DEFAULT '',
+            attribution VARCHAR(8) NOT NULL DEFAULT '',
+            impressions INTEGER, clicks INTEGER, cost FLOAT, conversions INTEGER,
+            CONSTRAINT uq_direct_breakdown_daily
+                UNIQUE (domain, date, kind, key_hash, goal_key, attribution)
+        )""", ["domain", "date", "kind", "key_hash", "key_id", "key_text", "campaign_id",
+               "attribution", "impressions", "clicks", "cost", "conversions"]),
+}
 
-    Идемпотентно: сверяется с фактической схемой и добавляет только то, чего
-    нет. Без этого обновление вкладки на работающей панели падало бы на
-    ``no such column`` — таблица создана прошлой версией и живёт со старым
+# Индексы пересобираемых таблиц — при DROP TABLE они исчезают вместе с ней.
+_REBUILD_INDEXES: dict[str, list[tuple[str, str]]] = {
+    "direct_daily": [("ix_direct_daily_dom_date", "(domain, date)"),
+                     ("ix_direct_daily_domain", "(domain)")],
+    "direct_campaign_daily": [("ix_direct_camp_dom_date", "(domain, date)"),
+                              ("ix_direct_campaign_daily_domain", "(domain)")],
+    "direct_breakdown_daily": [("ix_direct_brk_dom_kind_date", "(domain, kind, date)"),
+                               ("ix_direct_breakdown_daily_domain", "(domain)")],
+}
+
+
+def _rebuild_for_goal_key(engine, table: str) -> None:
+    """Пересобрать таблицу так, чтобы ``goal_key`` вошёл в уникальный ключ.
+
+    Строки переносятся как есть с ``goal_key=''``. Пустой ключ означает «как
+    собирали раньше» — по всем целям аккаунта либо по единственной заданной
+    цели; отделить одно от другого задним числом нечем, поэтому и не
+    выдумываем. Новые серии лягут рядом под своими ключами.
+    """
+    ddl, columns = _REBUILD_WITH_GOAL_KEY[table]
+    new = f"{table}__goalkey"
+    cols = ", ".join(columns)
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {new}"))
+        conn.execute(text(ddl.format(new=new)))
+        conn.execute(text(
+            f"INSERT INTO {new} ({cols}, goal_key) SELECT {cols}, '' FROM {table}"))
+        moved = conn.execute(text(f"SELECT COUNT(*) FROM {new}")).scalar_one()
+        conn.execute(text(f"DROP TABLE {table}"))
+        conn.execute(text(f"ALTER TABLE {new} RENAME TO {table}"))
+        for name, cols_sql in _REBUILD_INDEXES.get(table, []):
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} {cols_sql}"))
+    logger.info("Директ: %s пересобрана под goal_key, перенесено строк %s", table, moved)
+
+
+def ensure_direct_schema(engine) -> None:
+    """Привести схему таблиц Директа к текущей версии вкладки.
+
+    Идемпотентно: сверяется с фактической схемой и делает только недостающее.
+    Без этого обновление вкладки на работающей панели падало бы на
+    ``no such column`` — таблицы созданы прошлой версией и живут со старым
     набором колонок.
     """
     try:
@@ -89,19 +174,30 @@ def ensure_direct_schema(engine) -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("Директ: не удалось добавить %s.%s", table, name)
 
+    for table in _REBUILD_WITH_GOAL_KEY:
+        if table not in existing_tables:
+            continue
+        if "goal_key" in {c["name"] for c in inspector.get_columns(table)}:
+            continue
+        try:
+            _rebuild_for_goal_key(engine, table)
+        except Exception:  # noqa: BLE001
+            logger.exception("Директ: не удалось пересобрать %s под goal_key", table)
+
 
 class DirectDaily(Base):
     """Итоги аккаунта за сутки (ACCOUNT_PERFORMANCE_REPORT)."""
 
     __tablename__ = "direct_daily"
     __table_args__ = (
-        UniqueConstraint("domain", "date", "attribution", name="uq_direct_daily"),
+        UniqueConstraint("domain", "date", "goal_key", "attribution", name="uq_direct_daily"),
         Index("ix_direct_daily_dom_date", "domain", "date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     domain: Mapped[str] = mapped_column(String(255), index=True)
     date: Mapped[date_type] = mapped_column(Date)
+    goal_key: Mapped[str] = mapped_column(String(32), default="")
     attribution: Mapped[str] = mapped_column(String(8), default="")
     impressions: Mapped[int] = mapped_column(Integer, default=0)
     clicks: Mapped[int] = mapped_column(Integer, default=0)
@@ -114,7 +210,7 @@ class DirectCampaignDaily(Base):
 
     __tablename__ = "direct_campaign_daily"
     __table_args__ = (
-        UniqueConstraint("domain", "date", "campaign_id", "attribution",
+        UniqueConstraint("domain", "date", "campaign_id", "goal_key", "attribution",
                          name="uq_direct_campaign_daily"),
         Index("ix_direct_camp_dom_date", "domain", "date"),
     )
@@ -124,6 +220,7 @@ class DirectCampaignDaily(Base):
     date: Mapped[date_type] = mapped_column(Date)
     campaign_id: Mapped[str] = mapped_column(String(32))
     campaign_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    goal_key: Mapped[str] = mapped_column(String(32), default="")
     attribution: Mapped[str] = mapped_column(String(8), default="")
     impressions: Mapped[int] = mapped_column(Integer, default=0)
     clicks: Mapped[int] = mapped_column(Integer, default=0)
@@ -145,7 +242,7 @@ class DirectBreakdownDaily(Base):
 
     __tablename__ = "direct_breakdown_daily"
     __table_args__ = (
-        UniqueConstraint("domain", "date", "kind", "key_hash", "attribution",
+        UniqueConstraint("domain", "date", "kind", "key_hash", "goal_key", "attribution",
                          name="uq_direct_breakdown_daily"),
         Index("ix_direct_brk_dom_kind_date", "domain", "kind", "date"),
     )
@@ -158,6 +255,7 @@ class DirectBreakdownDaily(Base):
     key_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     key_text: Mapped[str] = mapped_column(Text)
     campaign_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    goal_key: Mapped[str] = mapped_column(String(32), default="")
     attribution: Mapped[str] = mapped_column(String(8), default="")
     impressions: Mapped[int] = mapped_column(Integer, default=0)
     clicks: Mapped[int] = mapped_column(Integer, default=0)

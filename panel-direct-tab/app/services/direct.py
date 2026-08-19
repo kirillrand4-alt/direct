@@ -30,7 +30,19 @@ def _i(value) -> int:
 
 
 def _goals_for(domain) -> list[str]:
-    """ID целей Метрики для конверсий: на домен или общие. Пусто = без конверсий."""
+    """ID целей Метрики для конверсий. Пусто = конверсии по всем целям аккаунта.
+
+    Берём **первый набор** целей домена — тот же, что первым идёт в истории.
+    Иначе живой просмотр наверху страницы и история под ним считали бы разные
+    цели, а разойтись им нельзя: человек читает их как одно и то же.
+    """
+    if domain:
+        from app.services.direct_collect import goal_sets
+
+        primary = goal_sets(domain)
+        if primary and primary[0][1]:
+            return list(primary[0][1])
+
     from app.credentials import get_cred
 
     raw = ""

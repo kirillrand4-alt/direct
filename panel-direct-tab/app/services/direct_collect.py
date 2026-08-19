@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -40,6 +41,44 @@ class _Range:
 
     def __init__(self, start: date, end: date):
         self.start, self.end = start, end
+
+
+# Наборы целей задаются строками вида ``Лид 1=123456789`` — по одной на строку.
+# Имя набора становится ``goal_key`` в истории: серии разных целей живут рядом и
+# переключаются на вкладке, а не затирают друг друга.
+_GOAL_SET_RE = re.compile(r"^\s*([^=]{1,32}?)\s*=\s*([\d\s,;]+)\s*$")
+
+
+def goal_sets(domain: str) -> list[tuple[str, list[str]]]:
+    """Наборы целей домена: [(имя, [id целей])].
+
+    Пустой список целей с пустым именем означает «как есть»: Директ отдаёт
+    конверсии по всем целям кампании. Это же значение достаётся тем, у кого
+    настроен старый одиночный ``direct_goals`` — так уже собранная история
+    остаётся видимой, а не уезжает под новый ключ.
+    """
+    from app.credentials import get_cred
+
+    raw = (get_cred(f"direct_goal_sets:{domain}") or "").strip()
+    if not raw:
+        raw = (get_cred("direct_goal_sets") or "").strip()
+    out: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for line in raw.replace("\r", "").split("\n"):
+        m = _GOAL_SET_RE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip()[:32]
+        ids = [g for g in re.split(r"[\s,;]+", m.group(2)) if g.isdigit()]
+        if not name or not ids or name in seen:
+            continue
+        seen.add(name)
+        out.append((name, ids))
+    if out:
+        return out
+
+    goals, _attr, _kinds = settings_for(domain)
+    return [("", goals)]
 
 
 def settings_for(domain: str) -> tuple[list[str], str, list[str]]:
@@ -97,21 +136,33 @@ def collect(db: Session, domain: str, dr, job_type: str = "daily") -> int:
     run_id = run.id
 
     provider = YandexDirectProvider()
-    attr_arg = [attribution] if (goals and attribution) else None
+    sets = goal_sets(domain)
     try:
         total = 0
-        total += store.save_daily(
-            db, domain, attr_key,
-            provider.daily(domain, dr, goals or None, attr_arg))
-        total += store.save_campaigns(
-            db, domain, attr_key,
-            provider.campaigns_daily(domain, dr, goals or None, attr_arg))
-        for kind in kinds:
-            _, id_field, text_field = YandexDirectProvider.BREAKDOWNS[kind]
-            total += store.save_breakdown(
-                db, domain, kind, attr_key,
-                provider.breakdown_daily(domain, dr, kind, goals or None, attr_arg),
-                id_field, text_field)
+        for index, (goal_key, set_goals) in enumerate(sets):
+            # Атрибуция имеет смысл только вместе с целями и только тогда входит
+            # в ключ — иначе ветка ключа расходится на пустом месте.
+            arg_goals = set_goals or None
+            attr_arg = [attribution] if (set_goals and attribution) else None
+            key_attr = attr_key if set_goals else ""
+            total += store.save_daily(
+                db, domain, key_attr,
+                provider.daily(domain, dr, arg_goals, attr_arg), goal_key)
+            total += store.save_campaigns(
+                db, domain, key_attr,
+                provider.campaigns_daily(domain, dr, arg_goals, attr_arg), goal_key)
+            # Разрезы собираем только под первый набор. Каждый следующий удвоил
+            # бы самую объёмную таблицу истории (сотни тысяч строк на 90 дней)
+            # ради колонки конверсий, тогда как показы, клики и расход в них
+            # одни и те же.
+            if index:
+                continue
+            for kind in kinds:
+                _, id_field, text_field = YandexDirectProvider.BREAKDOWNS[kind]
+                total += store.save_breakdown(
+                    db, domain, kind, key_attr,
+                    provider.breakdown_daily(domain, dr, kind, arg_goals, attr_arg),
+                    id_field, text_field, goal_key)
         # Журнал изменений настроек. В своём try: это дополнительная польза, и
         # она не должна лишать нас статистики, если один из сервисов Директа
         # ответил ошибкой (например, не принял имя поля).

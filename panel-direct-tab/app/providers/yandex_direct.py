@@ -59,7 +59,7 @@ def _error_text(resp: httpx.Response) -> str:
 
 # Столбец конверсий, когда в отчёте заданы цели: Директ переименовывает
 # ``Conversions`` в ``Conversions_<цель>_<модель атрибуции>`` — например
-# ``Conversions_474843983_LSCCD``. Имя модели в суффиксе не совпадает с кодом,
+# ``Conversions_123456789_LSCCD``. Имя модели в суффиксе не совпадает с кодом,
 # который передаётся в ``AttributionModels`` (LSC → LSCCD), поэтому узнаём
 # столбец по форме, а не по точному имени.
 _GOAL_CONVERSIONS_RE = re.compile(r"^Conversions_\d+(?:_[A-Za-z]+)?$")

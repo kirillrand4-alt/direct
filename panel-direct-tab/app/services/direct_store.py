@@ -86,18 +86,21 @@ def _upsert(db: Session, model, rows: list[dict], keys: list[str]) -> int:
     return written
 
 
-def save_daily(db: Session, domain: str, attribution: str, raw: Sequence[dict]) -> int:
+def save_daily(db: Session, domain: str, attribution: str, raw: Sequence[dict],
+               goal_key: str = "") -> int:
     """ACCOUNT_PERFORMANCE_REPORT с полем Date → ``direct_daily``."""
     rows = []
     for r in raw:
         d = _day(r.get("Date"))
         if d is None:
             continue
-        rows.append({"domain": domain, "date": d, "attribution": attribution, **_metrics(r)})
-    return _upsert(db, DirectDaily, rows, ["domain", "date", "attribution"])
+        rows.append({"domain": domain, "date": d, "goal_key": goal_key,
+                     "attribution": attribution, **_metrics(r)})
+    return _upsert(db, DirectDaily, rows, ["domain", "date", "goal_key", "attribution"])
 
 
-def save_campaigns(db: Session, domain: str, attribution: str, raw: Sequence[dict]) -> int:
+def save_campaigns(db: Session, domain: str, attribution: str, raw: Sequence[dict],
+                   goal_key: str = "") -> int:
     rows = []
     for r in raw:
         d = _day(r.get("Date"))
@@ -107,14 +110,15 @@ def save_campaigns(db: Session, domain: str, attribution: str, raw: Sequence[dic
         rows.append({
             "domain": domain, "date": d, "campaign_id": cid,
             "campaign_name": (r.get("CampaignName") or "")[:512] or None,
-            "attribution": attribution, **_metrics(r),
+            "goal_key": goal_key, "attribution": attribution, **_metrics(r),
         })
     return _upsert(db, DirectCampaignDaily, rows,
-                   ["domain", "date", "campaign_id", "attribution"])
+                   ["domain", "date", "campaign_id", "goal_key", "attribution"])
 
 
 def save_breakdown(db: Session, domain: str, kind: str, attribution: str,
-                   raw: Sequence[dict], id_field: str | None, text_field: str) -> int:
+                   raw: Sequence[dict], id_field: str | None, text_field: str,
+                   goal_key: str = "") -> int:
     """Строки одного разреза → ``direct_breakdown_daily``.
 
     Ключ строки — идентификатор, если Директ его даёт (фраза, регион), иначе сам
@@ -143,10 +147,10 @@ def save_breakdown(db: Session, domain: str, kind: str, attribution: str,
             "domain": domain, "date": d, "kind": kind, "key_hash": key_hash,
             "key_id": key_id or None, "key_text": text or key_id,
             "campaign_id": str(r.get("CampaignId") or "").strip() or None,
-            "attribution": attribution, **m,
+            "goal_key": goal_key, "attribution": attribution, **m,
         }
     return _upsert(db, DirectBreakdownDaily, list(merged.values()),
-                   ["domain", "date", "kind", "key_hash", "attribution"])
+                   ["domain", "date", "kind", "key_hash", "goal_key", "attribution"])
 
 
 # ---------------- чтение ---------------- #
@@ -160,11 +164,12 @@ _AGG = (
 
 
 def totals(db: Session, domain: str, start: date_type, end: date_type,
-           attribution: str = "") -> dict:
+           attribution: str = "", goal_key: str = "") -> dict:
     """Итоги аккаунта за период из сохранённой истории."""
     row = db.execute(
         select(*_AGG).where(
             DirectDaily.domain == domain,
+            DirectDaily.goal_key == goal_key,
             DirectDaily.attribution == attribution,
             DirectDaily.date >= start, DirectDaily.date <= end,
         )
@@ -180,12 +185,13 @@ def totals(db: Session, domain: str, start: date_type, end: date_type,
 
 
 def series(db: Session, domain: str, start: date_type, end: date_type,
-           attribution: str = "") -> list[dict]:
+           attribution: str = "", goal_key: str = "") -> list[dict]:
     """Подённый ряд для графика."""
     rows = db.execute(
         select(DirectDaily.date, DirectDaily.impressions, DirectDaily.clicks,
                DirectDaily.cost, DirectDaily.conversions)
-        .where(DirectDaily.domain == domain, DirectDaily.attribution == attribution,
+        .where(DirectDaily.domain == domain, DirectDaily.goal_key == goal_key,
+               DirectDaily.attribution == attribution,
                DirectDaily.date >= start, DirectDaily.date <= end)
         .order_by(DirectDaily.date)
     ).all()
@@ -194,7 +200,7 @@ def series(db: Session, domain: str, start: date_type, end: date_type,
 
 
 def campaigns(db: Session, domain: str, start: date_type, end: date_type,
-              attribution: str = "") -> list[dict]:
+              attribution: str = "", goal_key: str = "") -> list[dict]:
     """Кампании за период: суммы по дням + имя на последний день периода.
 
     Имя берётся отдельным запросом, а не ``max(campaign_name)`` в агрегате.
@@ -204,6 +210,7 @@ def campaigns(db: Session, domain: str, start: date_type, end: date_type,
     переименовывают регулярно, так что это не теоретический случай.
     """
     where = (DirectCampaignDaily.domain == domain,
+             DirectCampaignDaily.goal_key == goal_key,
              DirectCampaignDaily.attribution == attribution,
              DirectCampaignDaily.date >= start, DirectCampaignDaily.date <= end)
 
@@ -237,7 +244,7 @@ def campaigns(db: Session, domain: str, start: date_type, end: date_type,
 
 
 def breakdown(db: Session, domain: str, kind: str, start: date_type, end: date_type,
-              attribution: str = "", limit: int = 200) -> list[dict]:
+              attribution: str = "", limit: int = 200, goal_key: str = "") -> list[dict]:
     """Топ строк одного разреза за период (по расходу)."""
     rows = db.execute(
         select(
@@ -249,6 +256,7 @@ def breakdown(db: Session, domain: str, kind: str, start: date_type, end: date_t
         )
         .where(DirectBreakdownDaily.domain == domain,
                DirectBreakdownDaily.kind == kind,
+               DirectBreakdownDaily.goal_key == goal_key,
                DirectBreakdownDaily.attribution == attribution,
                DirectBreakdownDaily.date >= start, DirectBreakdownDaily.date <= end)
         .group_by(DirectBreakdownDaily.key_text)

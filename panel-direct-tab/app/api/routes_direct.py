@@ -46,7 +46,7 @@ def _resolve_domain(domains: list[dict], domain: str | None) -> str | None:
 @router.get("/direct")
 def direct_page(request: Request, domain: str | None = None,
                 start: str | None = None, end: str | None = None,
-                kind: str | None = None,
+                kind: str | None = None, goal: str | None = None,
                 msg: str | None = None, db: Session = Depends(get_db)):
     from app.credentials import get_cred
     from app.services.direct import direct_overview
@@ -67,7 +67,7 @@ def direct_page(request: Request, domain: str | None = None,
         "token_set": bool((get_cred("yandex_direct_token") or "").strip()),
         "login": get_cred(f"direct_login:{cur}") if cur else None,
         **data,
-        **_history_ctx(db, cur, dr, kind),
+        **_history_ctx(db, cur, dr, kind, goal),
         **_accounts_ctx(db, domains),
     }
     return templates.TemplateResponse(request, "direct.html", ctx)
@@ -94,7 +94,8 @@ def _accounts_ctx(db: Session, domains: list[dict]) -> dict:
     }
 
 
-def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
+def _history_ctx(db: Session, domain: str | None, dr, kind: str | None,
+                 goal: str | None = None) -> dict:
     """Всё, что читается из сохранённой истории, а не из живого запроса.
 
     История может отсутствовать (сбор ещё не отработал) — тогда блок на вкладке
@@ -107,12 +108,18 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
     empty = {"hist": None, "kind": kind if kind in kinds else None, "kinds": kinds,
              "goals": "", "attribution": "", "breakdowns": "", "last_run": None,
              "changes": [], "field_titles": {}, "track_bids": False,
-             "main_domain": "", "has_own_token": False}
+             "main_domain": "", "has_own_token": False,
+             "goal_sets_raw": "", "goal_keys": [], "goal_key": ""}
     if not domain:
         return empty
 
     goals, attribution, enabled_kinds = direct_collect.settings_for(domain)
-    attr_key = attribution if goals else ""
+    # Ключ серии: имя набора целей. Пустой — «как собирали раньше», по всем
+    # целям аккаунта; он же достаётся домену со старой одиночной настройкой.
+    sets = direct_collect.goal_sets(domain)
+    goal_keys = [k for k, _ids in sets]
+    goal_key = goal if goal is not None and goal in goal_keys else goal_keys[0]
+    attr_key = attribution if dict(sets).get(goal_key) else ""
     from app.credentials import get_cred
     from app.services import direct_changes
     empty.update({"goals": ",".join(goals), "attribution": attribution,
@@ -123,7 +130,9 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
                   "field_titles": direct_changes.FIELD_TITLES,
                   "track_bids": bool((get_cred(f"direct_track_bids:{domain}") or "").strip()),
                   "main_domain": (get_cred("direct_main_domain") or "").strip(),
-                  "has_own_token": bool((get_cred(f"direct_token:{domain}") or "").strip())})
+                  "has_own_token": bool((get_cred(f"direct_token:{domain}") or "").strip()),
+                  "goal_sets_raw": (get_cred(f"direct_goal_sets:{domain}") or ""),
+                  "goal_keys": goal_keys, "goal_key": goal_key})
 
     first, last = store.history_bounds(db, domain)
     if first is None:
@@ -137,12 +146,13 @@ def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
     empty["kind"] = cur_kind
     empty["hist"] = {
         "first": first, "last": last,
-        "totals": store.totals(db, domain, dr.start, dr.end, attr_key),
-        "prev": store.totals(db, domain, prev_start, prev_end, attr_key),
+        "totals": store.totals(db, domain, dr.start, dr.end, attr_key, goal_key),
+        "prev": store.totals(db, domain, prev_start, prev_end, attr_key, goal_key),
         "prev_range": (prev_start, prev_end),
-        "series": store.series(db, domain, dr.start, dr.end, attr_key),
-        "campaigns": store.campaigns(db, domain, dr.start, dr.end, attr_key),
-        "breakdown": (store.breakdown(db, domain, cur_kind, dr.start, dr.end, attr_key)
+        "series": store.series(db, domain, dr.start, dr.end, attr_key, goal_key),
+        "campaigns": store.campaigns(db, domain, dr.start, dr.end, attr_key, goal_key),
+        "breakdown": (store.breakdown(db, domain, cur_kind, dr.start, dr.end, attr_key,
+                                      goal_key=goal_key)
                       if cur_kind else []),
         "enabled_kinds": enabled_kinds,
     }
@@ -296,6 +306,28 @@ def ui_direct_accounts_bind_all(overwrite: str = Form(""), db: Session = Depends
     else:
         msg = "Нечего привязывать: всё найденное уже привязано."
     return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
+
+
+@router.post("/ui/direct/goal-sets")
+def ui_direct_goal_sets(domain: str = Form(...), goal_sets: str = Form("")):
+    """Наборы целей домена — по строке на набор: ``Лид 1=123456789``.
+
+    Имя набора становится ключом серии в истории, поэтому серии разных целей
+    живут рядом и переключаются на вкладке, а не затирают друг друга.
+    """
+    from app.credentials import set_cred
+    from app.services import direct_collect
+
+    domain = (domain or "").strip()
+    if not domain:
+        return RedirectResponse(url=f"{BP}/direct?msg={quote('Не указан домен.')}",
+                                status_code=303)
+    set_cred(f"direct_goal_sets:{domain}", (goal_sets or "").strip())
+    parsed = [k for k, ids in direct_collect.goal_sets(domain) if ids]
+    msg = (("Наборы целей сохранены: %s. Цифры появятся после сбора." % ", ".join(parsed))
+           if parsed else "Наборы целей очищены — конверсии считаются по всем целям.")
+    return RedirectResponse(
+        url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)
 
 
 @router.post("/ui/direct/collect-settings")

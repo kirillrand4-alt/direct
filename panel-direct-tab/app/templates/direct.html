@@ -97,6 +97,17 @@
     {% if hist %}<small style="float:right">данные с {{ hist.first }} по {{ hist.last }}</small>{% endif %}
   </header>
 
+  {% if goal_keys|length > 1 %}
+  <p>
+    <small>Конверсии по цели:</small><br>
+    {% for g in goal_keys %}
+    <a href="{{ base_path }}/direct?domain={{ cur_domain }}&start={{ range.start }}&end={{ range.end }}{% if kind %}&kind={{ kind }}{% endif %}&goal={{ g }}"
+       role="button" class="{{ '' if g == goal_key else 'outline' }}"
+       style="margin-right:.4rem;padding:.15rem .6rem;font-size:.8rem">{{ g or 'все цели' }}</a>
+    {% endfor %}
+  </p>
+  {% endif %}
+
   {% if hist %}
   {% set t = hist.totals %}{% set p = hist.prev %}
   {% macro delta(now, was) -%}
@@ -149,7 +160,7 @@
   <h4 style="margin-top:1rem">Разрезы</h4>
   <p>
     {% for k in hist.enabled_kinds %}
-    <a href="{{ base_path }}/direct?domain={{ cur_domain }}&start={{ range.start }}&end={{ range.end }}&kind={{ k }}"
+    <a href="{{ base_path }}/direct?domain={{ cur_domain }}&start={{ range.start }}&end={{ range.end }}&kind={{ k }}&goal={{ goal_key }}"
        role="button" class="{{ '' if k == kind else 'outline' }}" style="margin-right:.4rem">
       {{ {'criteria':'Фразы','query':'Поисковые запросы','device':'Устройства','region':'Регионы'}[k] }}
     </a>
@@ -179,6 +190,11 @@
     </table>
   </figure>
   <p><small>Топ-200 строк по расходу за выбранный период.</small></p>
+  {% elif goal_keys and goal_key != goal_keys[0] %}
+  <p><small>Разрезы собираются только под первый набор целей
+    (<strong>{{ goal_keys[0] or 'все цели' }}</strong>): показы, клики и расход в них те же,
+    а копия на каждую цель удвоила бы самую объёмную таблицу истории.
+    Переключитесь на него, чтобы увидеть срез.</small></p>
   {% else %}
   <p><small>За этот период в выбранном разрезе данных нет — возможно, разрез включили позже.
     Нажмите «Загрузить историю», чтобы дособрать его за прошлые дни.</small></p>
@@ -366,10 +382,26 @@
   {% endif %}
   {% if cur_domain %}
   <hr>
+  <form method="post" action="{{ base_path }}/ui/direct/goal-sets">
+    <input type="hidden" name="domain" value="{{ cur_domain }}">
+    <label>Наборы целей для {{ cur_domain }}<br>
+      <small>По строке на набор: <code>Имя=ID</code>. Имя набора становится подписью
+        переключателя над историей, серии живут рядом и не затирают друг друга.
+        Несколько целей в наборе — через запятую, они складываются.</small>
+      <textarea name="goal_sets" rows="3"
+                placeholder="Лид 1=123456789&#10;Квал=987654321">{{ goal_sets_raw }}</textarea>
+    </label>
+    <button type="submit" class="secondary">Сохранить наборы целей</button>
+    <small style="display:block;margin-top:.4rem">Разрезы (фразы, запросы, устройства)
+      собираются только под первый набор: показы, клики и расход в них одни и те же,
+      а копия на каждую цель удвоила бы самую объёмную таблицу истории.</small>
+  </form>
+  <hr>
   <form method="post" action="{{ base_path }}/ui/direct/collect-settings">
     <input type="hidden" name="domain" value="{{ cur_domain }}">
     <div class="grid">
-      <label>Цели Метрики для {{ cur_domain }}<br><small>ID через запятую; включают конверсии и CPA</small>
+      <label>Цель Метрики для {{ cur_domain }} (одна серия)<br>
+        <small>ID через запятую; для нескольких серий — форма «Наборы целей» ниже</small>
         <input name="goals" value="{{ goals }}" placeholder="напр. 123456789,987654321">
       </label>
       <label>Модель атрибуции<br><small>работает только вместе с целями</small>

@@ -218,7 +218,7 @@ def test_goals_still_narrow_the_report(monkeypatch):
 
 
 TSV_GOAL_CONV = (
-    "Date\tImpressions\tClicks\tCost\tConversions_474843983_LSCCD\n"
+    "Date\tImpressions\tClicks\tCost\tConversions_123456789_LSCCD\n"
     "2026-08-12\t125661\t2459\t79209.57\t4\n"
     "2026-08-13\t98997\t1426\t59665.16\t5\n"
 )
@@ -233,7 +233,7 @@ def test_goal_conversions_column_is_folded_back(monkeypatch):
     """С заданной целью Директ переименовывает столбец конверсий.
 
     Регрессия с боевого сервера: вместо ``Conversions`` приходит
-    ``Conversions_<цель>_<модель>`` (например ``Conversions_474843983_LSCCD``,
+    ``Conversions_<цель>_<модель>`` (например ``Conversions_123456789_LSCCD``,
     причём суффикс модели не совпадает с кодом, который мы передаём — LSC).
     Разбор искал ``Conversions``, не находил, и заданная цель молча обнуляла
     конверсии по всем доменам.
@@ -241,7 +241,7 @@ def test_goal_conversions_column_is_folded_back(monkeypatch):
     monkeypatch.setattr("app.credentials.get_cred",
                         _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
     respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_GOAL_CONV))
-    rows = YandexDirectProvider().daily("d.ru", _dr(), goals=["474843983"])
+    rows = YandexDirectProvider().daily("d.ru", _dr(), goals=["123456789"])
     assert rows[0]["Conversions"] == "4"
     assert rows[1]["Conversions"] == "5"
     # переименованного столбца в строке остаться не должно
