@@ -235,6 +235,100 @@
 </article>
 {% endif %}
 
+<details style="margin-top:1.2rem"{% if token_set and not accounts %} open{% endif %}>
+  <summary>Кабинеты Директа{% if accounts %} — найдено {{ accounts|length }}{% endif %}</summary>
+
+  <p><small>Один токен открывает столько кабинетов, представителем скольких является его
+    владелец. Перечислить их через API нельзя: <code>AgencyClients.get</code> отвечает
+    «оператор не является представителем агентства». Логины видны только в интерфейсе —
+    <a href="https://direct.yandex.ru/" target="_blank" rel="noopener">Директ Про</a> →
+    «Доступные аккаунты». Скопируйте оттуда список целиком и вставьте сюда: подписи вида
+    «Бренд A · Редактор» отбрасываются сами. Домен каждого кабинета панель определит по
+    ссылкам его объявлений — из логина он не выводится, Яндекс выдаёт их вида
+    <code>brand-a-100001-k7x2</code>.</small></p>
+
+  <form method="post" action="{{ base_path }}/ui/direct/accounts/scan">
+    <label>Логины кабинетов
+      <textarea name="logins" rows="5"
+                placeholder="brand-a-100001-k7x2&#10;Бренд A · Редактор&#10;brand-b-100002-m3q8&#10;Бренд B · Редактор"></textarea>
+    </label>
+    <button type="submit" class="secondary">Проверить кабинеты</button>
+  </form>
+
+  {% if accounts %}
+  <figure>
+    <table role="grid">
+      <thead><tr>
+        <th>Логин</th><th>Кабинет</th><th>Кампаний</th><th>Живых</th>
+        <th>Клики 90д</th><th>Расход 90д, ₽</th>
+        <th>Домен по объявлениям</th><th>Привязка</th>
+      </tr></thead>
+      <tbody>
+      {% for a in accounts %}
+        {% set bound_here = a.domain and accounts_bound.get(a.domain) == a.login %}
+        <tr>
+          <td><code>{{ a.login }}</code></td>
+          <td>
+            {% if a.status == 'ok' %}
+              <small>{{ a.client_info or '—' }}{% if a.client_id %} · {{ a.client_id }}{% endif %}</small>
+            {% else %}
+              <small style="color:var(--pico-del-color, #c33)">{{ a.error_text|truncate(90) }}</small>
+            {% endif %}
+          </td>
+          <td>{{ a.campaigns }}</td>
+          <td>{{ a.live_campaigns }}</td>
+          <td>{{ a.clicks_90d|numfmt }}</td>
+          <td>{{ a.cost_90d|round|int|numfmt }}</td>
+          <td>
+            {% if a.domain %}{{ a.domain }}
+              {% if a.domain not in accounts_panel_domains %}
+              <br><small style="color:var(--pico-del-color, #c33)">нет в панели</small>
+              {% endif %}
+            {% else %}<small>—</small>{% endif %}
+          </td>
+          <td>
+            {% if a.domain and a.domain in accounts_panel_domains %}
+            <form method="post" action="{{ base_path }}/ui/direct/accounts/bind"
+                  style="display:inline">
+              <input type="hidden" name="domain" value="{{ a.domain }}">
+              <input type="hidden" name="login" value="{{ '' if bound_here else a.login }}">
+              <button type="submit" class="{{ 'outline' if bound_here else 'secondary' }}"
+                      style="padding:.15rem .5rem;font-size:.75rem;margin:0">
+                {{ 'привязан — снять' if bound_here else 'привязать' }}
+              </button>
+            </form>
+            {% if accounts_bound.get(a.domain) and not bound_here %}
+            <br><small>занят: <code>{{ accounts_bound[a.domain] }}</code></small>
+            {% endif %}
+            {% else %}<small>—</small>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </figure>
+
+  <form method="post" action="{{ base_path }}/ui/direct/accounts/bind-all" style="display:inline">
+    <button type="submit" class="secondary">Привязать всё найденное</button>
+  </form>
+  <form method="post" action="{{ base_path }}/ui/direct/collect-all"
+        style="display:inline-flex;gap:.5rem;margin-left:.5rem">
+    <button type="submit" class="outline" name="days" value="0">Собрать по всем доменам</button>
+    <button type="submit" class="outline" name="days" value="480">История за 480 дней по всем</button>
+  </form>
+  <p><small>«Привязать всё найденное» не трогает домены, у которых логин уже задан руками —
+    отдельный токен и логин под него важнее результата разведки. Если на один домен смотрят
+    два кабинета, побеждает тот, через который идёт расход: по числу кампаний дубль от
+    рабочего кабинета не отличить.</small></p>
+  {% if main_domain and not accounts_bound.get(main_domain) %}
+  <article><small>⚠️ Общий токен привязан к домену <strong>{{ main_domain }}</strong>, но кабинет
+    ему не назначен. Значит запросы по этому домену уходят в кабинет самого владельца токена —
+    у него может не быть ни одной кампании, и статистика окажется пустой. Привяжите кабинет
+    в таблице выше или снимите привязку домена в «Настройках Директа».</small></article>
+  {% endif %}
+  {% endif %}
+</details>
+
 <details style="margin-top:1.2rem">
   <summary>Настройки Директа</summary>
   <form method="post" action="{{ base_path }}/ui/direct/token" class="grid">

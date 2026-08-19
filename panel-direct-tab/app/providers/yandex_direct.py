@@ -136,7 +136,7 @@ class YandexDirectProvider:
 
     # ---------- запрос отчёта ---------- #
     def _report(self, domain, dr, report_type: str, field_names, goals=None,
-                attribution=None) -> list[dict]:
+                attribution=None, login: str | None = None) -> list[dict]:
         headers = {
             "Authorization": f"Bearer {self._token(domain)}",
             "Accept-Language": "ru",
@@ -147,7 +147,9 @@ class YandexDirectProvider:
             "skipReportHeader": "true",
             "skipReportSummary": "true",
         }
-        login = self._login(domain)
+        # ``login`` перекрывает привязку по домену — нужен разведке кабинетов,
+        # которая спрашивает отчёт до того, как привязка существует.
+        login = (login or "").strip() or self._login(domain)
         if login:
             headers["Client-Login"] = login
 
@@ -203,12 +205,17 @@ class YandexDirectProvider:
         )
 
     # ---------- обычные сервисы API v5 (не Reports) ---------- #
-    def _call(self, domain, service: str, method: str, params: dict) -> dict:
+    def _call(self, domain, service: str, method: str, params: dict,
+              login: str | None = None) -> dict:
         """Вызов обычного сервиса v5: ``{"method": ..., "params": ...}`` → ``result``.
 
         Отличается от ``_report`` во всём: другой URL (сервис в пути), другое тело,
         ответ — JSON, а не TSV, и нет очереди с ``retryIn``. Поэтому отдельный метод,
         а не параметр к существующему.
+
+        ``login`` перекрывает ``Client-Login``, взятый по домену. Нужен разведке
+        кабинетов (``app.services.direct_accounts``): она опрашивает логины **до**
+        того, как известно, какому домену каждый принадлежит, — привязки ещё нет.
         """
         url = self._url().rsplit("/", 1)[0] + f"/{service}"
         headers = {
@@ -216,7 +223,7 @@ class YandexDirectProvider:
             "Accept-Language": "ru",
             "Content-Type": "application/json; charset=utf-8",
         }
-        login = self._login(domain)
+        login = (login or "").strip() or self._login(domain)
         if login:
             headers["Client-Login"] = login
 
@@ -237,7 +244,7 @@ class YandexDirectProvider:
         return payload.get("result") or {}
 
     def _paged(self, domain, service: str, params: dict, key: str,
-               limit: int = 1000) -> list[dict]:
+               limit: int = 1000, login: str | None = None) -> list[dict]:
         """``get`` с постраничным обходом: Директ отдаёт ``LimitedBy`` — смещение
         следующей страницы. Без обхода у крупного аккаунта молча потерялся бы хвост."""
         out: list[dict] = []
@@ -245,13 +252,84 @@ class YandexDirectProvider:
         while True:
             page = dict(params)
             page["Page"] = {"Limit": limit, "Offset": offset}
-            result = self._call(domain, service, "get", page)
+            result = self._call(domain, service, "get", page, login=login)
             rows = result.get(key) or []
             out.extend(rows)
             limited_by = result.get("LimitedBy")
             if not rows or limited_by is None:
                 break
             offset = int(limited_by)
+        return out
+
+    # ---------- разведка кабинетов ---------- #
+    # Все состояния кампаний. Архивные тоже нужны: у заброшенного кабинета живых
+    # кампаний нет вовсе, а домен по объявлениям определить всё равно можно.
+    ALL_CAMPAIGN_STATES = ["ON", "OFF", "SUSPENDED", "ENDED", "CONVERTED", "ARCHIVED"]
+    # Сколько кампаний перечислять в одном запросе объявлений.
+    ADS_CAMPAIGN_CHUNK = 10
+    # Потолок страницы объявлений. Крупный аккаунт отдаёт десятки тысяч — для
+    # определения домена столько не нужно, хватает первой страницы.
+    ADS_PAGE_LIMIT = 1000
+
+    def get_client_info(self, login: str | None = None, domain=None) -> dict:
+        """Чей это кабинет: ``ClientId`` и название. Заодно проверка доступа —
+        нет прав представителя, и Директ ответит ошибкой ещё здесь."""
+        result = self._call(domain, "clients", "get",
+                            {"FieldNames": ["Login", "ClientId", "ClientInfo", "CreatedAt"]},
+                            login=login)
+        clients = result.get("Clients") or []
+        return clients[0] if clients else {}
+
+    def list_campaigns_brief(self, login: str | None = None, domain=None) -> list[dict]:
+        """Кампании кабинета во всех состояниях: только ``Id``/``Name``/``State``.
+
+        Отдельно от ``get_campaigns``: тому нужны полные настройки для снапшота,
+        и на большом аккаунте это несопоставимо дороже по баллам API.
+        """
+        params = {"SelectionCriteria": {"States": list(self.ALL_CAMPAIGN_STATES)},
+                  "FieldNames": ["Id", "Name", "State"]}
+        return self._paged(domain, "campaigns", params, "Campaigns", login=login)
+
+    def account_totals(self, dr, login: str | None = None, domain=None) -> dict:
+        """Клики и расход кабинета за период — одной строкой.
+
+        Нужны разведке как признак живого кабинета: на один домен нередко
+        заведено два, и отличает их не число кампаний (у обоих может быть по
+        одной), а то, через какой идут деньги.
+        """
+        rows = self._report(domain, dr, "ACCOUNT_PERFORMANCE_REPORT",
+                            ["Impressions", "Clicks", "Cost"], login=login)
+        clicks, cost = 0, 0.0
+        for row in rows:
+            clicks += _int(row.get("Clicks"))
+            try:
+                cost += float(str(row.get("Cost") or 0).replace(",", "."))
+            except ValueError:
+                pass
+        return {"clicks": clicks, "cost": cost}
+
+    def ad_hrefs(self, campaign_ids, login: str | None = None, domain=None) -> list[str]:
+        """Ссылки объявлений указанных кампаний — по ним и опознаётся домен.
+
+        Спрашиваем одну страницу: домен кабинета определяется по большинству, а
+        не по полной выгрузке, и тянуть все 24 тысячи объявлений крупного
+        аккаунта ради этого незачем.
+        """
+        ids = [str(c) for c in campaign_ids if c is not None]
+        if not ids:
+            return []
+        params = {
+            "SelectionCriteria": {"CampaignIds": ids},
+            "FieldNames": ["Id"],
+            "TextAdFieldNames": ["Href"],
+            "Page": {"Limit": self.ADS_PAGE_LIMIT, "Offset": 0},
+        }
+        result = self._call(domain, "ads", "get", params, login=login)
+        out: list[str] = []
+        for ad in result.get("Ads") or []:
+            href = (ad.get("TextAd") or {}).get("Href")
+            if href:
+                out.append(str(href))
         return out
 
     # Настройки кампании, которые имеет смысл сторожить. Только общие для всех

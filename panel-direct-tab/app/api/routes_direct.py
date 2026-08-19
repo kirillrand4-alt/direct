@@ -68,8 +68,30 @@ def direct_page(request: Request, domain: str | None = None,
         "login": get_cred(f"direct_login:{cur}") if cur else None,
         **data,
         **_history_ctx(db, cur, dr, kind),
+        **_accounts_ctx(db, domains),
     }
     return templates.TemplateResponse(request, "direct.html", ctx)
+
+
+def _accounts_ctx(db: Session, domains: list[dict]) -> dict:
+    """Блок «Кабинеты Директа»: что нашла разведка и что уже привязано.
+
+    Отдельная функция, а не часть ``_history_ctx``: тот считает всё в разрезе
+    одного выбранного домена, а кабинеты — общие для вкладки и не зависят от
+    того, какой домен сейчас открыт.
+    """
+    from app.services import direct_accounts
+
+    names = [d["domain"] for d in domains]
+    panel_domains = set(names)
+    accounts = direct_accounts.listing(db)
+    return {
+        "accounts": accounts,
+        "accounts_bound": direct_accounts.bound_logins(names),
+        "accounts_suggested": {dom: acc.login
+                               for dom, acc in direct_accounts.suggest(db, panel_domains).items()},
+        "accounts_panel_domains": panel_domains,
+    }
 
 
 def _history_ctx(db: Session, domain: str | None, dr, kind: str | None) -> dict:
@@ -207,6 +229,75 @@ def ui_direct_account_domain(domain: str = Form("")):
         url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)
 
 
+@router.post("/ui/direct/accounts/scan")
+def ui_direct_accounts_scan(logins: str = Form(""), db: Session = Depends(get_db)):
+    """Опросить вставленные логины кабинетов — в фоне, как и сбор.
+
+    Разведка одного кабинета — это три-четыре запроса к API, а кабинетов бывает
+    два десятка: держать HTTP-запрос всё это время нельзя.
+    """
+    from app.services import direct_accounts
+
+    parsed = direct_accounts.parse_logins(logins)
+    if not parsed:
+        return RedirectResponse(
+            url=f"{BP}/direct?msg={quote('Не нашёл ни одного логина в списке.')}",
+            status_code=303)
+
+    names = [d["domain"] for d in _domain_list(db)]
+
+    def _run():
+        from app.db.base import SessionLocal
+
+        session = SessionLocal()
+        try:
+            direct_accounts.scan(session, parsed, set(names))
+        except Exception:  # noqa: BLE001 — вкладка покажет то, что успело записаться
+            logging.getLogger(__name__).exception("Директ: разведка кабинетов упала")
+        finally:
+            session.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    msg = (f"Проверяю {len(parsed)} кабинетов — идёт в фоне, обновите страницу через минуту.")
+    return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
+
+
+@router.post("/ui/direct/accounts/bind")
+def ui_direct_accounts_bind(domain: str = Form(...), login: str = Form("")):
+    """Привязать (или отвязать, если логин пустой) кабинет к домену."""
+    from app.services import direct_accounts
+
+    domain = (domain or "").strip()
+    login = (login or "").strip()
+    if not domain:
+        return RedirectResponse(url=f"{BP}/direct?msg={quote('Не указан домен.')}",
+                                status_code=303)
+    if login:
+        direct_accounts.bind(domain, login)
+        msg = f"Директ: {domain} → кабинет {login}."
+    else:
+        direct_accounts.unbind(domain)
+        msg = f"Директ: привязка для {domain} снята."
+    return RedirectResponse(
+        url=f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}", status_code=303)
+
+
+@router.post("/ui/direct/accounts/bind-all")
+def ui_direct_accounts_bind_all(overwrite: str = Form(""), db: Session = Depends(get_db)):
+    """Привязать разом всё, что разведка нашла однозначно."""
+    from app.services import direct_accounts
+
+    names = [d["domain"] for d in _domain_list(db)]
+    done = direct_accounts.bind_suggested(db, set(names), overwrite=bool(overwrite))
+    if done:
+        msg = ("Привязано доменов: %d (%s). Статистика появится после сбора."
+               % (len(done), ", ".join(d for d, _ in done[:6])
+                  + ("…" if len(done) > 6 else "")))
+    else:
+        msg = "Нечего привязывать: всё найденное уже привязано."
+    return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
+
+
 @router.post("/ui/direct/collect-settings")
 def ui_direct_collect_settings(domain: str = Form(...), goals: str = Form(""),
                                attribution: str = Form(""),
@@ -261,6 +352,49 @@ def _collect_in_thread(domain: str, days: int | None) -> None:
             db.close()
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+@router.post("/ui/direct/collect-all")
+def ui_direct_collect_all(days: int = Form(0), db: Session = Depends(get_db)):
+    """Собрать по всем подключённым доменам сразу.
+
+    После массовой привязки доменов становится два десятка, и обходить их
+    кнопкой «Собрать сейчас» по одному — та же ручная работа, от которой
+    избавляет разведка. Домены идут последовательно в одном потоке: параллельные
+    запросы к Директу упираются в лимит баллов и получают ошибку 429.
+    """
+    from app.services import direct_collect
+
+    domains = direct_collect.connected_domains(db)
+    if not domains:
+        return RedirectResponse(
+            url=f"{BP}/direct?msg={quote('Нет ни одного домена с привязанным кабинетом.')}",
+            status_code=303)
+
+    span = days if days > 0 else None
+
+    def _run():
+        from app.db.base import SessionLocal
+
+        session = SessionLocal()
+        try:
+            for name in domains:
+                try:
+                    if span:
+                        direct_collect.backfill(session, name, span)
+                    else:
+                        direct_collect.collect(session, name,
+                                               direct_collect.compute_window(session, name),
+                                               job_type="manual")
+                except Exception:  # noqa: BLE001 — один домен не должен ронять остальные
+                    logging.getLogger(__name__).exception("Директ: сбор для %s упал", name)
+        finally:
+            session.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    msg = ("Запущен сбор по %d доменам%s — идёт в фоне."
+           % (len(domains), f", история за {span} дн." if span else ""))
+    return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
 
 
 @router.post("/ui/direct/collect")

@@ -2,7 +2,7 @@
 """Устанавливает вкладку «Директ» в дерево панели SEO Статистики.
 
 Что делает (идемпотентно — повторный запуск ничего не ломает):
-  1. копирует 4 новых файла в дерево ``app/`` панели;
+  1. копирует новые файлы в дерево ``app/`` панели;
   2. патчит ``app/main.py``  — регистрирует роутер ``routes_direct``;
   3. патчит ``app/templates/partials/nav.html`` — добавляет пункт меню «Директ».
 
@@ -30,6 +30,7 @@ NEW_FILES = [
     ("app/services/direct_store.py", "app/services/direct_store.py"),
     ("app/services/direct_collect.py", "app/services/direct_collect.py"),
     ("app/services/direct_changes.py", "app/services/direct_changes.py"),
+    ("app/services/direct_accounts.py", "app/services/direct_accounts.py"),
     ("app/services/metrika_resync.py", "app/services/metrika_resync.py"),
     ("app/db/models_direct.py", "app/db/models_direct.py"),
     ("app/api/routes_direct.py", "app/api/routes_direct.py"),

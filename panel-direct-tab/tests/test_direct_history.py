@@ -215,12 +215,18 @@ def test_daily_run_survives_a_broken_domain(monkeypatch=None):
 
 
 def test_page_renders_with_history():
-    """Страница должна отрисоваться и с историей, и без неё."""
+    """Страница должна отрисоваться и с историей, и без неё.
+
+    Путь берём из настроек, а не зашиваем: на боевом сервере панель живёт под
+    префиксом (``base_path=/stat``), и запрос к ``/direct`` там отдаёт 404 —
+    тест падал на окружении, а не на коде.
+    """
     from fastapi.testclient import TestClient
+    from app.config import get_settings
     from app.main import create_app
 
     client = TestClient(create_app())
-    r = client.get("/direct")
+    r = client.get(f"{get_settings().base_path}/direct")
     assert r.status_code == 200, r.status_code
     assert "Директ" in r.text
 
@@ -240,21 +246,21 @@ def test_general_token_connects_only_its_own_domain():
     set_cred("yandex_direct_token", "y0_OBSHCHIY")
     set_cred("direct_main_domain", "")
     # общий токен есть, владелец не назначен — не угадываем
-    assert p.is_connected("prokompressor.ru") is False
-    assert p.is_connected("meyer-corp.ru") is False
+    assert p.is_connected("brand-b.example") is False
+    assert p.is_connected("brand-f.example") is False
 
-    set_cred("direct_main_domain", "prokompressor.ru")
-    assert p.is_connected("prokompressor.ru") is True
-    assert p.is_connected("meyer-corp.ru") is False
+    set_cred("direct_main_domain", "brand-b.example")
+    assert p.is_connected("brand-b.example") is True
+    assert p.is_connected("brand-f.example") is False
 
     # у своего токена приоритет: домен подключён независимо от привязки общего
-    set_cred("direct_token:meyer-corp.ru", "y0_SVOY")
-    assert p.is_connected("meyer-corp.ru") is True
+    set_cred("direct_token:brand-f.example", "y0_SVOY")
+    assert p.is_connected("brand-f.example") is True
 
     # агентский случай: свой Client-Login тоже считается привязкой
-    set_cred("direct_login:usort.ru", "usort-client")
-    assert p.is_connected("usort.ru") is True
-    assert p.is_connected("po22.ru") is False
+    set_cred("direct_login:brand-h.example", "own-login")
+    assert p.is_connected("brand-h.example") is True
+    assert p.is_connected("brand-g.example") is False
 
 
 def test_only_bound_domains_are_collected():
@@ -263,17 +269,17 @@ def test_only_bound_domains_are_collected():
     from app.services import direct_collect
 
     set_cred("yandex_direct_token", "y0_OBSHCHIY")
-    set_cred("direct_main_domain", "prokompressor.ru")
+    set_cred("direct_main_domain", "brand-b.example")
 
     import app.api.routes_pages as rp
     rp._domains = lambda db: [{"domain": d, "engines": ["gsc"]} for d in
-                              ("prokompressor.ru", "meyer-corp.ru", "po22.ru", "usort.ru")]
+                              ("brand-b.example", "brand-f.example", "brand-g.example", "brand-h.example")]
     db = SessionLocal()
     try:
         got = sorted(direct_collect.connected_domains(db))
-        # meyer и usort привязаны в предыдущем тесте (свой токен / свой логин)
-        assert "prokompressor.ru" in got, got
-        assert "po22.ru" not in got, got
+        # brand-f и brand-h привязаны в предыдущем тесте (свой токен / свой логин)
+        assert "brand-b.example" in got, got
+        assert "brand-g.example" not in got, got
     finally:
         db.close()
 

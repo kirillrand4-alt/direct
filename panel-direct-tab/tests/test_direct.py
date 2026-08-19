@@ -39,9 +39,9 @@ def _creds(**kv):
 
 @respx.mock
 def test_report_200_parses_tsv(monkeypatch):
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="brand-c.example"))
     respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_CAMPAIGNS))
-    rows = YandexDirectProvider().campaigns("abac-kompressor.ru", _dr())
+    rows = YandexDirectProvider().campaigns("brand-c.example", _dr())
     assert rows[0]["CampaignName"] == "Поиск — Москва"
     assert rows[0]["Clicks"] == "141"
 
@@ -49,14 +49,14 @@ def test_report_200_parses_tsv(monkeypatch):
 @respx.mock
 def test_report_202_then_200(monkeypatch):
     """201/202 = очередь: повторяем тот же запрос, пока не 200."""
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="brand-c.example"))
     monkeypatch.setattr("app.providers.yandex_direct.time.sleep", lambda *_: None)
     route = respx.post(REPORTS_URL)
     route.side_effect = [
         httpx.Response(202, headers={"retryIn": "0"}),
         httpx.Response(200, text=TSV_DAILY),
     ]
-    rows = YandexDirectProvider().daily("abac-kompressor.ru", _dr())
+    rows = YandexDirectProvider().daily("brand-c.example", _dr())
     assert len(rows) == 2
     assert route.call_count == 2
 
@@ -64,7 +64,7 @@ def test_report_202_then_200(monkeypatch):
 @respx.mock
 def test_money_not_in_micros_header(monkeypatch):
     """Провайдер обязан слать returnMoneyInMicros: false и Bearer-токен."""
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="brand-c.example"))
     captured = {}
 
     def handler(request):
@@ -111,14 +111,14 @@ def test_overview_not_connected(monkeypatch):
 
 @respx.mock
 def test_overview_aggregates(monkeypatch):
-    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="abac-kompressor.ru"))
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST", direct_main_domain="brand-c.example"))
     respx.post(REPORTS_URL).mock(
         side_effect=[
             httpx.Response(200, text=TSV_CAMPAIGNS),  # campaigns()
             httpx.Response(200, text=TSV_DAILY),      # daily()
         ]
     )
-    out = direct_overview("abac-kompressor.ru", _dr())
+    out = direct_overview("brand-c.example", _dr())
     assert out["connected"] is True and out["error"] is None
     t = out["totals"]
     assert t["impressions"] == 10449

@@ -24,6 +24,8 @@ from __future__ import annotations
 from datetime import date as date_type
 from datetime import datetime, timezone
 
+import logging
+
 from sqlalchemy import (
     Date,
     DateTime,
@@ -33,14 +35,59 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Index,
+    inspect,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
+logger = logging.getLogger(__name__)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Колонки, добавленные к таблицам, которые у кого-то уже существуют.
+# ``create_all`` создаёт таблицы, но не меняет существующие, а alembic в панели
+# нет — поэтому такие колонки дописываем сами.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "direct_account": {
+        "clicks_90d": "INTEGER DEFAULT 0",
+        "cost_90d": "FLOAT DEFAULT 0",
+    },
+}
+
+
+def ensure_direct_schema(engine) -> None:
+    """Дописать недостающие колонки в уже созданные таблицы Директа.
+
+    Идемпотентно: сверяется с фактической схемой и добавляет только то, чего
+    нет. Без этого обновление вкладки на работающей панели падало бы на
+    ``no such column`` — таблица создана прошлой версией и живёт со старым
+    набором колонок.
+    """
+    try:
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+    except Exception:  # noqa: BLE001 — схема не критична для остальной панели
+        logger.exception("Директ: не удалось прочитать схему БД")
+        return
+
+    for table, columns in _ADDED_COLUMNS.items():
+        if table not in existing_tables:
+            continue  # create_all создаст её сразу правильной
+        have = {c["name"] for c in inspector.get_columns(table)}
+        for name, ddl in columns.items():
+            if name in have:
+                continue
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                logger.info("Директ: в %s добавлена колонка %s", table, name)
+            except Exception:  # noqa: BLE001
+                logger.exception("Директ: не удалось добавить %s.%s", table, name)
 
 
 class DirectDaily(Base):
@@ -171,6 +218,44 @@ class DirectChange(Base):
     field: Mapped[str] = mapped_column(String(64))
     old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DirectAccount(Base):
+    """Найденный рекламный кабинет: логин, чей он и на какой домен рекламирует.
+
+    Зачем таблица, если привязка домен→логин живёт в кредах
+    (``direct_login:<домен>``). Креды — это ключ-значение без обратного порядка:
+    по ним нельзя показать «какие кабинеты вообще есть, что в них и какие из них
+    ещё не привязаны». Разведка находит кабинеты пачкой, и её результат нужно
+    показать человеку **до** записи привязок — иначе кабинет-дубль тихо
+    перезапишет рабочий.
+
+    ``domain`` — доминирующий домен из ссылок объявлений. Определять по имени
+    логина нельзя: Яндекс выдаёт логины вида ``brand-a-100001-k7x2`` и
+    ``auto-a1b2c3d4``, в них домена нет вовсе.
+    """
+
+    __tablename__ = "direct_account"
+    __table_args__ = (
+        UniqueConstraint("login", name="uq_direct_account_login"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    login: Mapped[str] = mapped_column(String(128), index=True)
+    client_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    client_info: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    campaigns: Mapped[int] = mapped_column(Integer, default=0)
+    live_campaigns: Mapped[int] = mapped_column(Integer, default=0)
+    # клики и расход за последние месяцы — признак того, что кабинет рабочий,
+    # а не пустой дубль с тем же доменом
+    clicks_90d: Mapped[int] = mapped_column(Integer, default=0)
+    cost_90d: Mapped[float] = mapped_column(Float, default=0.0)
+    # доминирующий домен и полный счётчик хостов из ссылок объявлений (JSON)
+    domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    domains: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok | error
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class DirectCollectRun(Base):
