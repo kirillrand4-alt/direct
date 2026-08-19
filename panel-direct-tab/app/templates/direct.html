@@ -392,6 +392,16 @@
                 placeholder="Лид 1=123456789&#10;Квал=987654321">{{ goal_sets_raw }}</textarea>
     </label>
     <button type="submit" class="secondary">Сохранить наборы целей</button>
+  </form>
+  <form method="post" action="{{ base_path }}/ui/direct/goal-sets/suggest" style="display:inline">
+    <input type="hidden" name="domain" value="{{ cur_domain }}">
+    <button type="submit" class="outline">Подобрать из Метрики</button>
+  </form>
+  <form method="post" action="{{ base_path }}/ui/direct/goal-sets/suggest"
+        style="display:inline;margin-left:.4rem">
+    <button type="submit" class="outline">Подобрать для всех доменов</button>
+  </form>
+  <form style="display:none">
     <small style="display:block;margin-top:.4rem">Разрезы (фразы, запросы, устройства)
       собираются только под первый набор: показы, клики и расход в них одни и те же,
       а копия на каждую цель удвоила бы самую объёмную таблицу истории.</small>

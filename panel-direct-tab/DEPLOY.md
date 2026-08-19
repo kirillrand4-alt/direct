@@ -25,6 +25,7 @@ Restart-Service <служба панели>
 | `app/services/direct_collect.py` | окно сбора, бэкфилл, ночной прогон |
 | `app/services/direct_changes.py` | снапшот настроек и журнал изменений |
 | `app/services/direct_accounts.py` | разведка кабинетов и привязка их к доменам |
+| `app/services/direct_goals.py` | подбор целей Метрики для наборов конверсий |
 | `app/services/metrika_resync.py` | еженедельный пересинк визитов Метрики |
 | `app/db/models_direct.py` | таблицы |
 | `app/api/routes_direct.py` | роутер вкладки |
@@ -57,6 +58,12 @@ Restart-Service <служба панели>
 Разрезы собираются только под **первый** набор: показы, клики и расход в них одни и те
 же для любой цели, а копия на каждую удвоила бы самую объёмную таблицу истории.
 
+Кнопка «Подобрать из Метрики» заполняет наборы сама. Цели Roistat опознаются по
+идентификатору условия (`qualified_lead`, `lead_status`, `spam_lead`, `deal_success`), а не
+по названию: названия правят руками, и они расходятся между счётчиками вплоть до опечаток.
+Счётчик домена определяется по адресу входа в визитах — реестра «домен → счётчик» в панели
+нет.
+
 Колонку добавляет `ensure_direct_schema`. В SQLite уникальный ключ не меняется на месте,
 поэтому таблица пересобирается: новая схема, перелив строк, подмена, восстановление
 индексов. Старые строки получают пустой ключ — «как собирали раньше».
@@ -77,10 +84,10 @@ Restart-Service <служба панели>
 ```powershell
 python -m pytest tests/test_direct.py tests/test_direct_accounts.py `
                  tests/test_direct_changes.py tests/test_direct_history.py `
-                 tests/test_direct_goal_sets.py -q
+                 tests/test_direct_goal_sets.py tests/test_direct_goals.py -q
 ```
 
-63 теста. Провайдер и HTTP подменяются — проверяется наш код, а не доступность API.
+70 тестов. Провайдер и HTTP подменяются — проверяется наш код, а не доступность API.
 
 ## Подробности
 

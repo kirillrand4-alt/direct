@@ -308,6 +308,33 @@ def ui_direct_accounts_bind_all(overwrite: str = Form(""), db: Session = Depends
     return RedirectResponse(url=f"{BP}/direct?nocache=1&msg={quote(msg)}", status_code=303)
 
 
+@router.post("/ui/direct/goal-sets/suggest")
+def ui_direct_goal_sets_suggest(domain: str = Form(""), overwrite: str = Form(""),
+                                db: Session = Depends(get_db)):
+    """Подобрать наборы целей по счётчику Метрики — для одного домена или всех.
+
+    Цели опознаются по идентификатору условия (``qualified_lead``,
+    ``lead_status``…), а не по названию: названия правят руками, и они
+    расходятся между счётчиками вплоть до опечаток.
+    """
+    from app.services import direct_collect, direct_goals
+
+    domain = (domain or "").strip()
+    targets = [domain] if domain else direct_collect.connected_domains(db)
+    done = direct_goals.apply_suggested(db, targets, overwrite=bool(overwrite))
+    if done:
+        msg = "Наборы целей подобраны для %d доменов: %s" % (
+            len(done), "; ".join("%s — %s" % (d, t) for d, t in done[:3])
+            + ("…" if len(done) > 3 else ""))
+    else:
+        msg = ("Подбирать нечего: наборы уже заданы либо целей Roistat "
+               "на счётчике не нашлось.")
+    url = f"{BP}/direct?nocache=1&msg={quote(msg)}"
+    if domain:
+        url = f"{BP}/direct?domain={quote(domain)}&nocache=1&msg={quote(msg)}"
+    return RedirectResponse(url=url, status_code=303)
+
+
 @router.post("/ui/direct/goal-sets")
 def ui_direct_goal_sets(domain: str = Form(...), goal_sets: str = Form("")):
     """Наборы целей домена — по строке на набор: ``Лид 1=123456789``.

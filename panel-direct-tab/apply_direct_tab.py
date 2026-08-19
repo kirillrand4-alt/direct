@@ -31,6 +31,7 @@ NEW_FILES = [
     ("app/services/direct_collect.py", "app/services/direct_collect.py"),
     ("app/services/direct_changes.py", "app/services/direct_changes.py"),
     ("app/services/direct_accounts.py", "app/services/direct_accounts.py"),
+    ("app/services/direct_goals.py", "app/services/direct_goals.py"),
     ("app/services/metrika_resync.py", "app/services/metrika_resync.py"),
     ("app/db/models_direct.py", "app/db/models_direct.py"),
     ("app/api/routes_direct.py", "app/api/routes_direct.py"),
@@ -206,6 +207,41 @@ def patch_scheduler_resync(app_root: Path) -> None:
     print("• scheduler/jobs.py — еженедельный пересинк Метрики подключён (вс, 05:00).")
 
 
+def patch_visit_fields(app_root: Path) -> None:
+    """Добавляет ``ym:s:params`` в выгрузку визитов Метрики.
+
+    В параметрах визита лежит ``roistat-visit-id`` — идентификатор визита в
+    Roistat. Он единственный связывает обращение с его квалификацией: цели
+    приходят на разные визиты, а по ``client_id`` связка находится лишь у
+    четверти квалов (куки чистятся, устройства меняются). Метку несёт 81%
+    визитов, но 94-100% конверсий — непомеченное это роботы и односекундные
+    отказы, где скрипт не успел отработать.
+
+    Поле не разложено по колонкам, поэтому попадает в JSON ``extra`` само —
+    импортёр править не нужно.
+    """
+    path = app_root / "app" / "services" / "visits.py"
+    if not path.is_file():
+        print("• app/services/visits.py не найден — параметры визитов не подключены.")
+        return
+    text = path.read_text(encoding="utf-8")
+    if "ym:s:params" in text:
+        print("• visits.py — ym:s:params уже запрашивается, пропускаю.")
+        return
+    m = re.search(r'(VISIT_FIELDS\s*=\s*[\[(])(.*?)([\])])', text, re.S)
+    if not m:
+        print("• visits.py: не найден VISIT_FIELDS — добавьте ym:s:params вручную.")
+        return
+    block = m.group(2).rstrip()
+    indent = re.search(r"\n(\s+)\S", block)
+    pad = indent.group(1) if indent else "    "
+    tail = "," if not block.endswith(",") else ""
+    new = block + tail + f'\n{pad}"ym:s:params",\n'
+    _backup(path)
+    path.write_text(text[:m.start(2)] + new + text[m.end(2):], encoding="utf-8")
+    print("• visits.py — в выгрузку добавлено поле ym:s:params (roistat-visit-id).")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Установка вкладки «Директ» в панель.")
     ap.add_argument("--app-root", default=".",
@@ -222,6 +258,7 @@ def main() -> int:
     patch_nav(app_root)
     patch_jobs(app_root)
     patch_scheduler_resync(app_root)
+    patch_visit_fields(app_root)
     print("\nГотово. Осталось перезапустить службу панели, чтобы вкладка появилась.")
     return 0
 
