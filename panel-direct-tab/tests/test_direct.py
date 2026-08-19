@@ -215,3 +215,54 @@ def test_goals_still_narrow_the_report(monkeypatch):
     assert captured["params"]["Goals"] == ["123"]
     assert captured["params"]["AttributionModels"] == ["LSC"]
     assert captured["params"]["FieldNames"].count("Conversions") == 1
+
+
+TSV_GOAL_CONV = (
+    "Date\tImpressions\tClicks\tCost\tConversions_474843983_LSCCD\n"
+    "2026-08-12\t125661\t2459\t79209.57\t4\n"
+    "2026-08-13\t98997\t1426\t59665.16\t5\n"
+)
+TSV_TWO_GOALS = (
+    "Date\tImpressions\tClicks\tCost\tConversions_111_LSCCD\tConversions_222_LSCCD\n"
+    "2026-08-12\t100\t10\t50.00\t3\t7\n"
+)
+
+
+@respx.mock
+def test_goal_conversions_column_is_folded_back(monkeypatch):
+    """С заданной целью Директ переименовывает столбец конверсий.
+
+    Регрессия с боевого сервера: вместо ``Conversions`` приходит
+    ``Conversions_<цель>_<модель>`` (например ``Conversions_474843983_LSCCD``,
+    причём суффикс модели не совпадает с кодом, который мы передаём — LSC).
+    Разбор искал ``Conversions``, не находил, и заданная цель молча обнуляла
+    конверсии по всем доменам.
+    """
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
+    respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_GOAL_CONV))
+    rows = YandexDirectProvider().daily("d.ru", _dr(), goals=["474843983"])
+    assert rows[0]["Conversions"] == "4"
+    assert rows[1]["Conversions"] == "5"
+    # переименованного столбца в строке остаться не должно
+    assert not [k for k in rows[0] if k.startswith("Conversions_")]
+
+
+@respx.mock
+def test_several_goals_are_summed(monkeypatch):
+    """Несколько целей дают несколько столбцов — хранится одно число."""
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
+    respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_TWO_GOALS))
+    rows = YandexDirectProvider().daily("d.ru", _dr(), goals=["111", "222"])
+    assert rows[0]["Conversions"] == "10"
+
+
+@respx.mock
+def test_plain_conversions_untouched(monkeypatch):
+    """Без целей столбец обычный — трогать его нечем и незачем."""
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
+    respx.post(REPORTS_URL).mock(return_value=httpx.Response(200, text=TSV_DAILY))
+    rows = YandexDirectProvider().daily("d.ru", _dr())
+    assert "Conversions" not in rows[0]  # в этом фикстуре столбца нет вовсе

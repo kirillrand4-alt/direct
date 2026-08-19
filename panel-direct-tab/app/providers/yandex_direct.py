@@ -16,6 +16,7 @@ HTTP — через ``httpx`` (как остальные провайдеры Я
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import httpx
@@ -54,6 +55,34 @@ def _error_text(resp: httpx.Response) -> str:
     if code:
         parts.append(f"код {code}")
     return " | ".join(p for p in parts if p) or resp.text[:200]
+
+
+# Столбец конверсий, когда в отчёте заданы цели: Директ переименовывает
+# ``Conversions`` в ``Conversions_<цель>_<модель атрибуции>`` — например
+# ``Conversions_474843983_LSCCD``. Имя модели в суффиксе не совпадает с кодом,
+# который передаётся в ``AttributionModels`` (LSC → LSCCD), поэтому узнаём
+# столбец по форме, а не по точному имени.
+_GOAL_CONVERSIONS_RE = re.compile(r"^Conversions_\d+(?:_[A-Za-z]+)?$")
+
+
+def _fold_goal_conversions(rows: list[dict]) -> list[dict]:
+    """Свести ``Conversions_<цель>_<модель>`` обратно в ``Conversions``.
+
+    Без этого заданная цель молча превращала конверсии в нули: разбор искал
+    столбец ``Conversions``, а его в ответе не было вовсе. Несколько целей дают
+    несколько столбцов — складываем, потому что хранится одно число на строку.
+    """
+    if not rows:
+        return rows
+    goal_cols = [c for c in rows[0] if _GOAL_CONVERSIONS_RE.match(c)]
+    if not goal_cols:
+        return rows
+    for row in rows:
+        total = 0
+        for col in goal_cols:
+            total += _int(str(row.pop(col, 0)).replace("\xa0", "").replace(" ", ""))
+        row["Conversions"] = str(total)
+    return rows
 
 
 def _parse_tsv(text: str) -> list[dict]:
@@ -185,7 +214,7 @@ class YandexDirectProvider:
 
             code = resp.status_code
             if code == 200:
-                return _parse_tsv(resp.text)
+                return _fold_goal_conversions(_parse_tsv(resp.text))
             if code in (201, 202):
                 retry_in = _int(resp.headers.get("retryIn"), _DEFAULT_RETRY)
                 time.sleep(min(max(retry_in, 1), _MAX_SLEEP))
