@@ -5,6 +5,7 @@ HTTP замокан через respx (уже в requirements панели). Кр
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import httpx
@@ -143,3 +144,74 @@ def test_overview_error_is_caught(monkeypatch):
     assert out["connected"] is True
     assert "плохой период" in out["error"]
     assert out["totals"] is None
+
+
+@respx.mock
+def test_bid_modifiers_always_send_campaign_ids(monkeypatch):
+    """SelectionCriteria без CampaignIds сервис не принимает (ошибка 4001).
+
+    Регрессия с боевого сервера: запрос «только по уровням» делался первым,
+    падал всегда и лишь потом шёл запасной путь — два лишних обращения к API
+    на каждый домен каждую ночь.
+    """
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content.decode("utf-8"))
+        seen.append(body["params"]["SelectionCriteria"])
+        return httpx.Response(200, json={"result": {"BidModifiers": []}})
+
+    respx.post(REPORTS_URL.rsplit("/", 1)[0] + "/bidmodifiers").mock(side_effect=handler)
+    YandexDirectProvider().get_bid_modifiers("d.ru", campaign_ids=["111", "222"])
+    assert seen and all("CampaignIds" in s for s in seen), seen
+    assert seen[0]["CampaignIds"] == ["111", "222"]
+
+
+def test_bid_modifiers_skip_api_without_campaigns(monkeypatch):
+    """У аккаунта без кампаний спрашивать корректировки не о чем."""
+    monkeypatch.setattr("app.credentials.get_cred", _creds(yandex_direct_token="y0_TEST"))
+    assert YandexDirectProvider().get_bid_modifiers("d.ru", campaign_ids=[]) == []
+
+
+@respx.mock
+def test_conversions_requested_without_goals(monkeypatch):
+    """Конверсии должны запрашиваться всегда.
+
+    Регрессия с боевого сервера: поле добавлялось только вместе с ``Goals``,
+    целей никто не задавал — и панель хранила нули там, где у аккаунтов были
+    десятки тысяч конверсий. Без ``Goals`` Директ отдаёт конверсии по всем
+    целям кампании, ровно как показывает его интерфейс.
+    """
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
+    captured = {}
+
+    def handler(request):
+        captured["params"] = json.loads(request.content.decode("utf-8"))["params"]
+        return httpx.Response(200, text=TSV_CAMPAIGNS)
+
+    respx.post(REPORTS_URL).mock(side_effect=handler)
+    YandexDirectProvider().campaigns("d.ru", _dr())
+    assert "Conversions" in captured["params"]["FieldNames"]
+    # без целей модель атрибуции не уходит — Директ её отвергнет
+    assert "Goals" not in captured["params"]
+    assert "AttributionModels" not in captured["params"]
+
+
+@respx.mock
+def test_goals_still_narrow_the_report(monkeypatch):
+    """Явно заданные цели по-прежнему сужают выборку и включают атрибуцию."""
+    monkeypatch.setattr("app.credentials.get_cred",
+                        _creds(yandex_direct_token="y0_TEST", direct_main_domain="d.ru"))
+    captured = {}
+
+    def handler(request):
+        captured["params"] = json.loads(request.content.decode("utf-8"))["params"]
+        return httpx.Response(200, text=TSV_CAMPAIGNS)
+
+    respx.post(REPORTS_URL).mock(side_effect=handler)
+    YandexDirectProvider().campaigns("d.ru", _dr(), goals=["123"], attribution=["LSC"])
+    assert captured["params"]["Goals"] == ["123"]
+    assert captured["params"]["AttributionModels"] == ["LSC"]
+    assert captured["params"]["FieldNames"].count("Conversions") == 1

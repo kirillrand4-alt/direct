@@ -367,10 +367,26 @@ class YandexDirectProvider:
     # Сколько кампаний за раз перечислять в запасном пути (см. ниже).
     BID_MODIFIER_CHUNK = 100
 
-    def get_bid_modifiers(self, domain) -> list[dict]:
-        """Корректировки ставок: мобильные, демография, регионы, ретаргетинг."""
+    def get_bid_modifiers(self, domain, campaign_ids=None) -> list[dict]:
+        """Корректировки ставок: мобильные, демография, регионы, ретаргетинг.
+
+        ``SelectionCriteria`` обязана содержать хотя бы один из ``CampaignIds``,
+        ``AdGroupIds``, ``Ids`` — одних ``Levels`` сервису мало, он отвечает
+        ошибкой 4001. Раньше запрос без кампаний делался первым и падал всегда,
+        а список кампаний перечитывался заново в запасном пути: два лишних
+        обращения к API на каждый домен каждую ночь. Поэтому идём по кампаниям
+        сразу, а вызывающий может передать уже прочитанный список.
+
+        Куски по ``BID_MODIFIER_CHUNK``: ограничение сервиса на длину
+        ``CampaignIds`` жёстче, чем размер крупного аккаунта.
+        """
+        if campaign_ids is None:
+            campaign_ids = [c.get("Id") for c in self.get_campaigns(domain)]
+        ids = [str(c) for c in campaign_ids if c is not None]
+        if not ids:
+            return []
+
         params = {
-            "SelectionCriteria": {"Levels": list(self.BID_MODIFIER_LEVELS)},
             "FieldNames": ["Id", "CampaignId", "AdGroupId", "Type"],
             "MobileAdjustmentFieldNames": ["BidModifier"],
             "DesktopAdjustmentFieldNames": ["BidModifier"],
@@ -378,25 +394,15 @@ class YandexDirectProvider:
             "RegionalAdjustmentFieldNames": ["BidModifier", "RegionId"],
             "RetargetingAdjustmentFieldNames": ["BidModifier", "RetargetingConditionId"],
         }
-        try:
-            return self._paged(domain, "bidmodifiers", params, "BidModifiers")
-        except DirectError as exc:
-            # Часть аккаунтов сверх уровней требует явного перечисления кампаний.
-            # Тогда спрашиваем их список и идём кусками: ограничение сервиса на
-            # длину CampaignIds жёстче, чем размер крупного аккаунта.
-            if "CampaignIds" not in str(exc):
-                raise
-            logger.warning("Директ: корректировки требуют список кампаний (%s) — иду по кампаниям", exc)
-            ids = [str(c.get("Id")) for c in self.get_campaigns(domain) if c.get("Id") is not None]
-            out: list[dict] = []
-            for i in range(0, len(ids), self.BID_MODIFIER_CHUNK):
-                chunk = dict(params)
-                chunk["SelectionCriteria"] = {
-                    "Levels": list(self.BID_MODIFIER_LEVELS),
-                    "CampaignIds": ids[i:i + self.BID_MODIFIER_CHUNK],
-                }
-                out += self._paged(domain, "bidmodifiers", chunk, "BidModifiers")
-            return out
+        out: list[dict] = []
+        for i in range(0, len(ids), self.BID_MODIFIER_CHUNK):
+            chunk = dict(params)
+            chunk["SelectionCriteria"] = {
+                "Levels": list(self.BID_MODIFIER_LEVELS),
+                "CampaignIds": ids[i:i + self.BID_MODIFIER_CHUNK],
+            }
+            out += self._paged(domain, "bidmodifiers", chunk, "BidModifiers")
+        return out
 
     def get_keyword_bids(self, domain) -> list[dict]:
         """Ставки по ключевым фразам.
@@ -419,19 +425,23 @@ class YandexDirectProvider:
         return self._call(domain, "changes", "checkCampaigns", {"Timestamp": timestamp})
 
     # ---------- готовые отчёты (живой просмотр) ---------- #
+    # ``Conversions`` запрашивается всегда, а не только вместе с ``Goals``.
+    # Без ``Goals`` Директ отдаёт конверсии по всем целям, привязанным к
+    # кампании, — это ровно то число, что видно в его интерфейсе. Раньше поле
+    # добавлялось только при явно заданных целях, а целей никто не задавал, и
+    # панель хранила нули там, где у аккаунта были десятки тысяч конверсий.
+    # ``Goals`` по-прежнему сужает выборку до конкретных целей, а ``Goals`` +
+    # ``AttributionModels`` меняют методику подсчёта.
     def campaigns(self, domain, dr, goals=None, attribution=None) -> list[dict]:
         """Итоги за период в разрезе кампаний."""
-        fields = ["CampaignId", "CampaignName", "Impressions", "Clicks", "Cost"]
-        if goals:
-            fields.append("Conversions")
+        fields = ["CampaignId", "CampaignName", "Impressions", "Clicks", "Cost",
+                  "Conversions"]
         return self._report(domain, dr, "CAMPAIGN_PERFORMANCE_REPORT", fields,
                             goals, attribution)
 
     def daily(self, domain, dr, goals=None, attribution=None) -> list[dict]:
         """Подённая динамика по всему аккаунту."""
-        fields = ["Date", "Impressions", "Clicks", "Cost"]
-        if goals:
-            fields.append("Conversions")
+        fields = ["Date", "Impressions", "Clicks", "Cost", "Conversions"]
         return self._report(domain, dr, "ACCOUNT_PERFORMANCE_REPORT", fields,
                             goals, attribution)
 
@@ -452,9 +462,8 @@ class YandexDirectProvider:
         (дёшево для показа), здесь строка на кампанию-день (нужно для графиков и
         произвольной агрегации по неделям/месяцам).
         """
-        fields = ["Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost"]
-        if goals:
-            fields.append("Conversions")
+        fields = ["Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost",
+                  "Conversions"]
         return self._report(domain, dr, "CAMPAIGN_PERFORMANCE_REPORT", fields,
                             goals, attribution)
 
@@ -473,7 +482,5 @@ class YandexDirectProvider:
         if id_field:
             fields.append(id_field)
         fields.append(text_field)
-        fields += ["Impressions", "Clicks", "Cost"]
-        if goals:
-            fields.append("Conversions")
+        fields += ["Impressions", "Clicks", "Cost", "Conversions"]
         return self._report(domain, dr, report_type, fields, goals, attribution)

@@ -225,14 +225,22 @@ def sync(db: Session, domain: str, object_types: list[str] | None = None) -> int
     provider = YandexDirectProvider()
     types = object_types or ["campaign", "bid_modifier"]
     total = 0
+    # Список кампаний нужен и снапшоту кампаний, и корректировкам (те без
+    # CampaignIds не читаются вовсе). Читаем его один раз за сверку.
+    campaign_ids: list | None = None
     for object_type in types:
         method_name, _ = COLLECTORS[object_type]
         try:
-            rows = getattr(provider, method_name)(domain)
+            if object_type == "bid_modifier":
+                rows = provider.get_bid_modifiers(domain, campaign_ids=campaign_ids)
+            else:
+                rows = getattr(provider, method_name)(domain)
         except DirectError as exc:
             logger.warning("Директ: настройки «%s» для %s не прочитаны — %s",
                            object_type, domain, exc)
             continue
+        if object_type == "campaign":
+            campaign_ids = [r.get("Id") for r in rows if r.get("Id") is not None]
         total += len(sync_object_type(db, domain, object_type, rows))
     return total
 

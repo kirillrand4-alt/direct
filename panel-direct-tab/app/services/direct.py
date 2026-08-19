@@ -74,6 +74,10 @@ def direct_overview(domain, dr) -> dict:
         return _empty(connected=False)
 
     goals = _goals_for(domain)
+    # Колонки конверсий показываем и без явно заданных целей: Директ отдаёт
+    # конверсии по всем целям кампании, и прятать их только потому, что цель не
+    # выбрана вручную, — значит терять главную цифру отчёта. Окончательное
+    # решение принимается ниже, по тому, пришло ли хоть что-то.
     has_conv = bool(goals)
     # Та же модель атрибуции, что и у сбора истории. Иначе на одной странице
     # живые конверсии и конверсии из истории считались бы по разным методикам
@@ -138,5 +142,5 @@ def direct_overview(domain, dr) -> dict:
         "totals": totals,
         "daily": daily,
         "campaigns": campaigns,
-        "has_conversions": has_conv,
+        "has_conversions": has_conv or tconv > 0,
     }

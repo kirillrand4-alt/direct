@@ -168,7 +168,7 @@ def test_sync_survives_a_failing_service():
     try:
         dom = "partial.example"
         YandexDirectProvider.get_campaigns = lambda self, d: [_campaign()]
-        def _boom(self, d):
+        def _boom(self, d, campaign_ids=None):
             raise DirectError("не принято имя поля")
         YandexDirectProvider.get_bid_modifiers = _boom
         ch.sync(db, dom, ["campaign", "bid_modifier"])
@@ -179,6 +179,36 @@ def test_sync_survives_a_failing_service():
         n = db.execute(select(DirectSettingsSnapshot).where(
             DirectSettingsSnapshot.domain == dom)).scalars().all()
         assert len(n) == 1, n
+    finally:
+        db.close()
+
+
+def test_sync_reads_campaign_list_once():
+    """Корректировки не читаются без списка кампаний, а список уже прочитан
+    снапшотом кампаний — перечитывать его второй раз незачем."""
+    from app.providers.yandex_direct import YandexDirectProvider
+
+    db = SessionLocal()
+    try:
+        dom = "reuse.example"
+        calls = {"campaigns": 0}
+
+        def _campaigns(self, d):
+            calls["campaigns"] += 1
+            return [_campaign("111"), _campaign("222")]
+
+        got = {}
+
+        def _modifiers(self, d, campaign_ids=None):
+            got["ids"] = campaign_ids
+            return []
+
+        YandexDirectProvider.get_campaigns = _campaigns
+        YandexDirectProvider.get_bid_modifiers = _modifiers
+        ch.sync(db, dom, ["campaign", "bid_modifier"])
+        db.commit()
+        assert calls["campaigns"] == 1, calls
+        assert got["ids"] == ["111", "222"], got
     finally:
         db.close()
 
